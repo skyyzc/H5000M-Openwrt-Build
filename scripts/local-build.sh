@@ -1610,6 +1610,27 @@ install_board_plugins() {
 	return 0
 }
 
+# QModem parts that live outside the FUjr feed: LianXia233's generic modem UI
+# is its own repository (LUCI_DEPENDS +qmodem; it injects the built-in module
+# definition library that covers the RG520N-CN).  Cloned into package/ like
+# the board plugins, and required when ENABLE_QMODEM is on — a QModem build
+# without it is a build with no modem page.
+install_qmodem_extras() {
+	local failed=0
+
+	if is_true "$ENABLE_QMODEM"; then
+		clone_external luci-app-qmodem-generic \
+			https://github.com/LianXia233/luci-app-qmodem-generic.git main ||
+			failed=1
+	fi
+
+	if [ "$failed" -ne 0 ]; then
+		die "Could not fetch luci-app-qmodem-generic — refusing to build a QModem firmware without its panel"
+	fi
+
+	return 0
+}
+
 # Argon lives in two repositories outside every feed, so it is cloned into
 # package/ exactly like the board plugins rather than pulled from a feed.
 # Both Makefiles include $(TOPDIR)/feeds/luci/luci.mk, so this has to run after
@@ -2336,7 +2357,7 @@ EOF
 # LuCI app.  Built from source in this tree, so the kmod vermagic matches
 # this kernel exactly.
 CONFIG_PACKAGE_luci-app-oaf=y
-CONFIG_PACKAGE_open-app-filter=y
+CONFIG_PACKAGE_appfilter=y
 CONFIG_PACKAGE_kmod-oaf=y
 EOF
 	fi
@@ -2913,7 +2934,12 @@ build_required_packages() {
 	is_true "$ENABLE_UPNP" && REQUIRED_PACKAGES+=(luci-app-upnp miniupnpd-nftables)
 	is_true "$ENABLE_ADBLOCK" && REQUIRED_PACKAGES+=(adblock luci-app-adblock)
 	is_true "$ENABLE_QMODEM" && REQUIRED_PACKAGES+=(qmodem quectel-CM-5G-M luci-app-qmodem-next luci-app-qmodem-generic sms-forwarder-next kmod-usb-net-qmi-wwan kmod-usb-serial-option)
-	is_true "$ENABLE_OAF" && REQUIRED_PACKAGES+=(luci-app-oaf open-app-filter kmod-oaf)
+	# OpenAppFilter.  The two userspace package names are not the directory
+	# names: `open-app-filter/` builds PACKAGE_appfilter (PKG_NAME:=appfilter)
+	# and `oaf/` is a KernelPackage, so its symbol is the kmod- prefixed
+	# PACKAGE_kmod-oaf.  Verified against the Makefiles — `open-app-filter` is
+	# not a symbol at all and defconfig drops it silently.
+	is_true "$ENABLE_OAF" && REQUIRED_PACKAGES+=(luci-app-oaf appfilter kmod-oaf)
 	is_true "$ENABLE_HIGOROS" && REQUIRED_PACKAGES+=(kmod-hwmon-pwmfan)
 
 	# Required, not cosmetic.  Every line above is `is_true X && ...`, so when
@@ -3694,6 +3720,7 @@ main() {
 	pin_sing_box
 	install_local_packages
 	install_board_plugins
+	install_qmodem_extras
 	install_theme
 	stage_higoros_overlay
 	install_external_packages
