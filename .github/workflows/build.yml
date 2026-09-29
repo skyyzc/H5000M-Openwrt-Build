@@ -1304,11 +1304,20 @@ jobs:
           # what a chroot or container needs.  A release that carries only one of
           # them means fetching the Actions artifact — which expires — for the
           # others.
+          #
+          # U-Boot's failsafe web UI gates the initramfs upload on the file NAME
+          # (it looks for *.itb), so ship the same FIT under both names — the
+          # copy is byte-identical, only the extension differs.
+          for f in *initramfs-kernel.bin; do
+            [ -e "$f" ] && cp -f -- "$f" "${f/-initramfs-kernel.bin/-initramfs.itb}"
+          done
+
           files=()
           while IFS= read -r -d '' f; do files+=("$f"); done \
             < <(find . -maxdepth 1 -type f \( \
                   -name '*squashfs-sysupgrade.bin' \
                   -o -name '*initramfs-kernel.bin' \
+                  -o -name '*initramfs.itb' \
                   -o -name '*targz-rootfs.tar.gz' \
                   -o -name 'BUILD-INFO.txt' \
                   -o -name 'profiles.json' \
