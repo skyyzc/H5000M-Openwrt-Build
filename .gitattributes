@@ -4,16 +4,19 @@
 *.patch text eol=lf
 *.config text eol=lf
 *.env text eol=lf
+*.yml text eol=lf
 
-# higoros-overlay: vendor files must land in the image byte-for-byte as they
-# were pulled off the device.  No line-ending games on firmware blobs, board
-# data or the static Go binary; scripts stay LF.
-higoros-overlay/**/*.bin binary
-higoros-overlay/**/*.dat binary
-higoros-overlay/**/*.js binary
-higoros-overlay/**/*.css binary
-higoros-overlay/**/*.html binary
-higoros-overlay/**/*.json binary
-higoros-overlay/**/*.svg binary
-higoros-overlay/usr/bin/higorosd binary
-higoros-overlay/usr/bin/fancontrol binary
+# higoros-overlay: every file here is shipped into the firmware byte-for-byte,
+# so the default is "do not touch".  Git cannot work this out on its own:
+# `* text=auto` gets the PNG icons right (they contain NUL bytes) but a forced
+# `text eol=lf` corrupts them, and an ordinary text file with no extension is
+# a coin flip.  Only the files that have to be LF on the router are listed.
+#
+# Order matters — later rules win, so the blanket -text comes first and the
+# script lists override it.
+higoros-overlay/** -text
+higoros-overlay/**/*.sh text eol=lf
+higoros-overlay/etc/init.d/** text eol=lf
+higoros-overlay/etc/uci-defaults/** text eol=lf
+higoros-overlay/etc/fw_env.config text eol=lf
+higoros-overlay/usr/bin/to-failsafe text eol=lf
