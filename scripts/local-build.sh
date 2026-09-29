@@ -2371,6 +2371,12 @@ EOF
 # kernel cooling maps are already removed by patches/0001*, so nothing in
 # the kernel races the userspace controller for the PWM channel.
 CONFIG_PACKAGE_kmod-hwmon-pwmfan=y
+
+# U-Boot environment access: gives the image `fw_setenv failsafe 1` and the
+# vendor panel's env page a working backend.  The package ships the binaries
+# only — higoros-overlay/etc/fw_env.config supplies the partition layout
+# (/dev/mmcblk0p1 0x0 0x80000), and usr/bin/to-failsafe wraps the one-liner.
+CONFIG_PACKAGE_uboot-envtools=y
 EOF
 	fi
 
@@ -2940,7 +2946,7 @@ build_required_packages() {
 	# PACKAGE_kmod-oaf.  Verified against the Makefiles — `open-app-filter` is
 	# not a symbol at all and defconfig drops it silently.
 	is_true "$ENABLE_OAF" && REQUIRED_PACKAGES+=(luci-app-oaf appfilter kmod-oaf)
-	is_true "$ENABLE_HIGOROS" && REQUIRED_PACKAGES+=(kmod-hwmon-pwmfan)
+	is_true "$ENABLE_HIGOROS" && REQUIRED_PACKAGES+=(kmod-hwmon-pwmfan uboot-envtools)
 
 	# Required, not cosmetic.  Every line above is `is_true X && ...`, so when
 	# the LAST switch is off the final statement returns 1 and — because this

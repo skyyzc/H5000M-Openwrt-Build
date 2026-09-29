@@ -1,0 +1,81 @@
+#!/bin/sh
+# to-failsafe — one command into (and back out of) the U-Boot failsafe web UI.
+#
+# The bootloader on this board is Yuzhii0718/bl-mt798x-dhcpd (U-Boot
+# 2025.07.1-Mediatek, in the "fip" GPT partition).  It treats the environment
+# variable `failsafe` as a one-shot request: set to 1, the next boot lands in
+# the failsafe web UI instead of running bootcmd.  The vendor README documents
+# exactly these two commands:
+#
+#     fw_setenv env_invalid 1   # reset environment to defaults on next boot
+#     fw_setenv failsafe 1      # reboot to failsafe mode on next boot
+#
+# Usage
+#     to-failsafe             set the flag, then reboot
+#     to-failsafe -n          set the flag only — reboot when you are ready
+#     to-failsafe -c          report whether the flag is currently set
+#     to-failsafe -C          clear the flag
+#     to-failsafe -h          this text
+#
+# After the reboot the bootloader brings up a DHCP server on 192.168.9.1/24 and
+# serves its web UI at http://192.168.9.1 (also reachable as http://failsafe.lan).
+# Plug a PC into the LAN port, leave it on DHCP, open the page.  From there you
+# can upload an initramfs and boot it in RAM, rewrite flash, or just reboot back
+# into the normal system — the UI has its own /reboot-failsafe endpoint, so you
+# cannot get stuck there.
+
+set -eu
+
+CONFIG=/etc/fw_env.config
+FLAG=failsafe
+
+die() { printf 'to-failsafe: %s\n' "$*" >&2; exit 1; }
+
+# Refuse to write a flag we cannot read back.  `arch=arm` is present in the
+# vendor environment, so a successful read proves both the config file and the
+# partition offset are correct — a wrong /etc/fw_env.config would scribble the
+# wrong flash offset, and this check is what makes that impossible.
+[ -f "$CONFIG" ] || die "$CONFIG is missing; cannot address the U-Boot environment"
+fw_printenv arch >/dev/null 2>&1 || die "cannot read the U-Boot environment via $CONFIG"
+
+flag_state() {
+	# fw_printenv exits non-zero when the variable is absent, which is a
+	# perfectly normal state here — treat "absent" as "not set", not an error.
+	fw_printenv -n "$FLAG" 2>/dev/null | grep -qx '1'
+}
+
+MODE="${1:--r}"
+case "$MODE" in
+	-h|--help)
+		sed -n '2,22p' "$0" | sed -e 's/^# \{0,1\}//'
+		;;
+	-c|--check)
+		if flag_state; then
+			echo "failsafe flag is SET — the next boot goes to the U-Boot web UI"
+		else
+			echo "failsafe flag is not set"
+			exit 1
+		fi
+		;;
+	-C|--clear)
+		fw_setenv "$FLAG" >/dev/null 2>&1 || true
+		flag_state && die "flag is still set — the write did not take"
+		echo "failsafe flag cleared"
+		;;
+	-n|--no-reboot|-r|--reboot)
+		fw_setenv "$FLAG" 1
+		flag_state || die "flag did not stick — refusing to reboot into an unknown state"
+		if [ "$MODE" = "-n" ] || [ "$MODE" = "--no-reboot" ]; then
+			echo "failsafe flag set; reboot when you are ready:"
+			echo "    reboot"
+		else
+			echo "failsafe flag set; rebooting into the U-Boot web UI"
+			echo "after it comes up: http://192.168.9.1 or http://failsafe.lan (PC on DHCP)"
+			sync
+			reboot
+		fi
+		;;
+	*)
+		die "unknown option '$MODE' (try --help)"
+		;;
+esac

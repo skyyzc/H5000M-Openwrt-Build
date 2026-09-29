@@ -1326,12 +1326,17 @@ jobs:
           内核 ABI：${abi}
           构建日期：$(date -u +%Y-%m-%d)
 
-          已包含 luci-app-h5000m-fancontrol 风扇温控、luci-app-h5000m-netmode 出口优先级、
-          以及 ddimension/wwand 5G 拨号器。
+          已包含 HigoOS 海狗前端（higorosd + Vue 面板，80 端口）与风扇温控、
+          QModem 5G 拨号栈（Quectel RG520N-CN）、OpenAppFilter 应用过滤。
+          LAN 与出厂一致：http://192.168.88.1 ；传统 LuCI 在 8080。
 
-          刷机请用 *squashfs-sysupgrade.bin；*initramfs-kernel.bin 是恢复镜像；
-          *targz-rootfs.tar.gz 供容器或 chroot 使用。内核 ABI 见 BUILD-INFO.txt，
-          安装内核模块时必须与固件一致。
+          刷机请用 *squashfs-sysupgrade.bin；*initramfs.itb（与
+          *initramfs-kernel.bin 同一份 FIT）是 U-Boot failsafe 页面上传用的
+          内存镜像；*targz-rootfs.tar.gz 供容器或 chroot 使用。
+          内核 ABI 见 BUILD-INFO.txt，安装内核模块时必须与固件一致。
+
+          一句话进 failsafe：to-failsafe（= fw_setenv failsafe 1 && reboot），
+          之后电脑接 LAN、DHCP 打开 http://192.168.9.1 或 http://failsafe.lan。
 
           软件包仓库：https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
 
