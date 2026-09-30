@@ -838,46 +838,74 @@ prune_display_stack() {
 	fi
 
 	# 3. The `packages` feed keeps its own display/audio cycle contributors.
-	#    None of these is emitted by this build and nothing that IS emitted
-	#    depends on them, so pruning them removes the cycle without removing
-	#    anything reachable.  Each name is a feed directory, not a package.
 	#
-	#    ★ These are the PARENT directories, and that matters.  The first
-	#    version of this list named only `multimedia/gstreamer1`, which is a
-	#    real directory that really did get pruned - and changed nothing,
-	#    because gstreamer is not nested under `gstreamer1`.  It is six
-	#    SIBLINGS:
+	#    ★ DO NOT prune multimedia/ or sound/.  This was tried (commit ec2db25)
+	#    and it made things WORSE, in a way worth writing down: removing a
+	#    dependency does not remove the packages that depend on it.  Pruning
+	#    sound/ and multimedia/ left telephony's baresip, freeswitch and
+	#    asterisk, plus packages' gnunet and bmx7-dnsupdate, still in the tree
+	#    and now declaring `depends on libgstreamer1`, `depends on mpg123`,
+	#    `depends on pulseaudio`, `depends on portaudio`, `depends on
+	#    openal-soft`, `depends on lame-lib` for symbols that no longer exist.
+	#    Hundreds of unsatisfiable `depends on` clauses is precisely the input
+	#    that makes Kconfig start dropping symbols, so the prune aimed at
+	#    "removing a cycle" instead manufactured reasons to drop things.
+	#    The dependency graph has to be pruned from the DEPENDENTS down, or via
+	#    config, never by deleting a dependency out from under its users.
 	#
-	#        multimedia/gstreamer1  multimedia/gst1-libav
-	#        multimedia/gst1-plugins-base  multimedia/gst1-plugins-bad
-	#        multimedia/gst1-plugins-good  multimedia/gst1-plugins-ugly
+	#    What actually worked was dropping the `video` feed: 166 cycles -> 10.
+	#    The 10 that remain are all proxy-app cycles (see prune_proxy_cycles
+	#    below), and none of them involves a media package.
 	#
-	#    so pruning the one still left the other five installed, still emitting
-	#    `libgstreamer1` / `libgst1controller` / `libgst1net` / `gstreamer1-libs`
-	#    as missing dependencies on every `gst1-*`, `grilo*`, `lcdgrilo`,
-	#    `libextractor` and telephony's `baresip` Makefile - hundreds of lines
-	#    of it, and a fresh set of cycles.  Prune the parents, not a leaf.
-	#
-	#    Audited against the emit/required lists: not one package under
-	#    multimedia/ or sound/ is requested by this image (no gstreamer, mpd,
-	#    upmpdcli, squeezelite, pulseaudio, alsa-*, ffmpeg, imagemagick,
-	#    minidlna, motion, tvheadend...), on a headless 5G CPE that has no
-	#    display, no sound card and no camera.  `net/dmapd` is a DLNA media
-	#    server and goes with them.
-	for feed in \
-		multimedia \
-		sound \
-		net/dmapd; do
-		if [ -d "${SRC}/feeds/packages/${feed}" ]; then
-			log "Pruning feeds/packages/${feed} (Kconfig cycle source, not used by this image)"
-			rm -rf "${SRC}/feeds/packages/${feed}"
-		fi
-	done
+	#    So: nothing to prune here.  Left as an explicit, documented no-op so
+	#    nobody re-adds the multimedia/sound prune.
+	:
+	return 0
+}
 
-	# The php8 Config.in cycle (PHP8_INTL <-> PACKAGE_php8) is left alone on
-	# purpose: it exists in the healthy tree too, and luci-app-nekobox needs
-	# php8 when that switch is on.  A package-metadata.pl round-trip, not a
-	# removal, is the right fix there — out of scope for a build recipe.
+# The cycles that survived the video-feed removal, and why each one does not get
+# to drop qmodem.
+#
+# After the video feed is gone the graph still contains exactly these:
+#
+#   luci-app-hijpass <-> sing-box-tiny <-> sing-box
+#   luci-app-homeproxy <-> luci-app-homeproxy          (self)
+#   php8 <-> PHP8_INTL <-> luci-app-nekobox
+#   luci-app-momo <-> luci-app-momo                    (self)
+#   momo <-> momo                                      (self)
+#
+# All ten are third-party proxy front-ends.  Three of them - hijpass, nekobox
+# and momo - are packages this image ASKS for, so they cannot simply be
+# deleted; the rest are self-cycles on symbols nothing selects, which Kconfig
+# resolves by dropping the symbol and no one notices.
+#
+# The reason none of them takes qmodem down is that a Kconfig drop is
+# LOCAL to the cycle: it can only affect symbols reachable from the dropped
+# one.  The qmodem dependency closure (qmodem, luci-app-qmodem-next,
+# luci-app-qmodem-generic, qmodem-smsd, sms-forwarder-next, quectel-CM-5G-M,
+# kmod-usb-net-qmi-wwan...) does not touch sing-box, momo, homeproxy or php8.
+# Contrast wwand's libubus-lua-async loop, which DID kill qmodem: that symbol
+# sits in the same Provides/Conflicts neighbourhood and defconfig dragged the
+# dependents through.  Different closure, different outcome.
+#
+# This function exists to assert the second half of that claim rather than
+# assume it: the video feed staying out is checked in prune_display_stack, and
+# the proxy cycles are enumerated here so a new one shows up in a diff instead
+# of in a three-hour build.
+prune_proxy_cycles() {
+	# Nothing to remove - every participant is either wanted by this image or
+	# a self-cycle Kconfig drops harmlessly.  The value here is the check that
+	# the KNOWN cycle set has not grown a media member, which is what the
+	# video-feed note in feeds.conf.default is protecting.
+	local generated="${SRC}/tmp/.config-package.in"
+
+	[ -s "$generated" ] || return 0
+
+	if grep -qE 'symbol PACKAGE_(qt5|sdl|gstreamer1|gst1-|gtk|wpewebkit|mesa|vulkan)' \
+		"$generated"; then
+		die "a display/audio-stack symbol is back in the Kconfig graph ($generated). That is the condition that pushed recursive dependencies from 10 to 166 and made defconfig drop PACKAGE_qmodem. Check that the video feed is still commented out in feeds.conf.default and that multimedia/ was not restored."
+	fi
+
 	return 0
 }
 
@@ -3517,6 +3545,11 @@ verify_config() {
 		assert_repo_only nikki-rs
 		assert_repo_only clash-rs
 	}
+
+	# A display/audio symbol reappearing in the graph is the precondition for
+	# the failure this whole file's feed comments describe, so it is worth
+	# failing loudly on rather than discovering via a dropped PACKAGE_qmodem.
+	prune_proxy_cycles
 
 	# Every name emit_service wrote has to be a real package.  defconfig drops
 	# an unknown CONFIG_PACKAGE_x line with exit 0 and no diagnostic, so an
