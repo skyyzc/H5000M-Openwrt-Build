@@ -1,0 +1,40 @@
+#!/bin/sh /etc/rc.common
+# QModem 模组识别补扫服务（Hiveton H5000M 时序补偿）
+#
+# 为什么需要它
+# ------------
+# QModem 识别模组以「USB 接口已配齐 AT 端口」为前提。H5000M 冷启动时
+# RG520N-CN 的时序是：
+#     8.2s   usb 2-1 被 xhci-mtk 枚举
+#    13.6s   qmi_wwan_q 生成 cdc-wdm0 / wwan0
+#    14.5s   option 驱动生成 ttyUSB0 - ttyUSB3
+#
+# 而 QModem 的三条自动触发路径都落在更早或过短的窗口里：
+#   1) /etc/init.d/qmodem_init (S80) 的 _try_usb_slot -> add 2-1 usb
+#      首轮约 22s 发起；add_modem 内部有 net_devices / valid_at_ports 两道检查，
+#      配合 5 次 × 8s（共约 40s）的重试窗口。这 40s 内任何一次检查不过就
+#      give up add，且此后不再重试。
+#   2) /etc/hotplug.d/usb/20-modem-usb —— 只在 USB 设备出现的那一瞬触发一次。
+#   3) /etc/hotplug.d/net/20-modem-net —— 同理，只在该 netdev 出现时触发一次。
+#
+# 后果：模组永久停留在「未识别」—— ubus call qmodem info
+# '{"config_section":"2_1"}' 返回空数组，海狗 CPE 页显示「模组未识别」；
+# 但底层数据面（wwan0 + udhcpc + 默认路由）其实是通的，极易误判为 5G 故障。
+#
+# 本服务只做调用方补偿：开机后在若干时间点调用 QModem 官方扫描入口
+# /usr/share/qmodem/modem_scan.sh scan usb，识别成功即退出。
+# 不修改 QModem 任何文件、不改动其 uci 配置。删除本文件与 S92 软链即可回退。
+
+START=92
+STOP=08
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/sbin/qmodem-rescan
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# 本实例只跑一轮补扫后自然退出，不做 respawn
+	procd_set_param respawn 0 0 0
+	procd_close_instance
+}

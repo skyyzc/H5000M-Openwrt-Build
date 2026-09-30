@@ -1,0 +1,74 @@
+#!/bin/sh
+# QModem 模组识别补扫器（Hiveton H5000M 时序补偿）
+#
+# 背景见 /etc/init.d/qmodem-rescan 头部注释。这里只做一件事：
+# 在开机后的若干时间点各触发一次 QModem 官方扫描入口，直到识别成功为止。
+#
+# 用法：
+#   qmodem-rescan            按内置时间点补扫（由 init 服务调用）
+#   qmodem-rescan --now      立即补扫一次（排障用）
+#   qmodem-rescan --status   只查询当前是否已识别
+#
+# 判定「已识别」：qmodem uci 中存在 modem-device 配置节。
+# 与 QModem 自身状态完全解耦，不修改 QModem 任何文件或配置。
+
+SCAN_SH="/usr/share/qmodem/modem_scan.sh"
+TAG="qmodem-rescan"
+POINTS="20 45 80 120 180"
+
+log() {
+	logger -t "$TAG" "$1" 2>/dev/null || true
+	echo "[$TAG] $1"
+}
+
+recognized() {
+	uci -q show qmodem 2>/dev/null | grep -q "=modem-device"
+}
+
+scan_once() {
+	[ -x "$SCAN_SH" ] || { log "未找到 $SCAN_SH，跳过"; return 1; }
+	"$SCAN_SH" scan usb >/dev/null 2>&1
+	sleep 3
+	recognized
+}
+
+case "$1" in
+	--status)
+		if recognized; then
+			echo "recognized"
+			exit 0
+		fi
+		echo "not recognized"
+		exit 1
+		;;
+	--now)
+		if scan_once; then
+			log "手动补扫成功，模组已识别"
+			exit 0
+		fi
+		log "手动补扫后仍未识别"
+		exit 1
+		;;
+esac
+
+# 默认：按时间点补扫
+if recognized; then
+	log "启动时已识别，无需补扫"
+	exit 0
+fi
+
+for t in $POINTS; do
+	sleep "$t"
+	if recognized; then
+		log "已识别（等待 ${t}s 时检测到），停止补扫"
+		exit 0
+	fi
+	log "补扫第 ${t}s"
+	if scan_once; then
+		log "补扫成功（${t}s），模组已识别"
+		exit 0
+	fi
+done
+
+log "补扫结束仍未识别，等待后续 USB 热插拔事件"
+exit 1
