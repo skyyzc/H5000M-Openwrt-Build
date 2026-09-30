@@ -92,6 +92,39 @@ QMODEM_REPO_BRANCH="${QMODEM_REPO_BRANCH:-main}"
 # SHA is not a valid `git clone --branch` argument.  See pin_qmodem_feed().
 QMODEM_PINNED_REVISION="${QMODEM_PINNED_REVISION:-}"
 
+# Snapshot date for EVERY feed, as an ISO-8601 UTC instant.  Empty means
+# "follow the branch heads".
+#
+# ★ This is the knob that ends the churn.  A feed URL says `;master` or
+#   `;main`, so every feed tracks a moving branch, and pinning only the
+#   openwrt/openwrt tree does NOT give a reproducible build — it gives a
+#   current-feed-against-stale-tree build, which is the one combination that
+#   is guaranteed to be inconsistent.  Measured, on the same tree and the same
+#   upstream pin (bfb98589):
+#
+#     2026-09-29T12:40Z feeds -> 0 dangling refs,  26 recursive deps, BUILD OK
+#     2026-09-30T07:14Z feeds -> 8 dangling refs, 176 recursive deps, qmodem DROPPED
+#
+#   The delta is traceable to the minute: openwrt/packages committed
+#   be93cc55 (`libdrm: depend on video-support`) and 6e7270bc (`libevdev:
+#   depend on input-support`) at 09-29T14:50Z, two hours after the build that
+#   worked.  Those two symbols belong to upstream's new `Hardware support`
+#   category, which the pinned tree does not have, so the feed ends up
+#   referencing packages that do not exist.  From there the Kconfig graph is
+#   perturbed enough that the QModem closure is silently dropped, and
+#   verify_config() refuses to ship — correctly.
+#
+#   Set this to a moment whose upstream revision you have also pinned, and the
+#   build becomes a function of a fixed input set instead of the calendar.
+#   To advance: bump OPENWRT_PINNED_REVISION and this date together, then
+#   rebuild and check `Verified all emitted packages survived defconfig`.
+#
+#   Both knobs must name the SAME moment.  Pinning the tree to a revision
+#   older than the snapshot puts the feeds ahead of the tree (dangling refs,
+#   as above); pinning it newer is not a failure but makes the tree the odd
+#   one out for no gain.
+FEEDS_SNAPSHOT_DATE="${FEEDS_SNAPSHOT_DATE:-}"
+
 # The ddimension WWAN dialer feed (wwand, wwand-qmi/mbim/ncm/mhi/esim,
 # luci-app-wwand, luci-proto-wwand).  Installed only when ENABLE_WWAND=true;
 # see write_feeds_conf() for why the feed is conditional rather than always on.
@@ -936,6 +969,10 @@ prepare_feeds() {
 	# if a future revision of it does.
 	prune_display_stack
 
+	# Before install, so what gets linked into package/feeds is the pinned
+	# revision rather than the branch head.  See FEEDS_SNAPSHOT_DATE.
+	pin_all_feeds
+
 	log "Installing feeds"
 	run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds install -a ||
 		die "feeds install failed"
@@ -945,6 +982,87 @@ prepare_feeds() {
 	fix_qmodem_feed
 	verify_qmodem_feed
 	verify_oaf_feed
+}
+
+# Roll every feed back to the last commit at or before FEEDS_SNAPSHOT_DATE.
+#
+# Why this exists, in one paragraph: a feed URL names a branch (`;master`,
+# `;main`), `scripts/feeds` clones that branch, and nothing in this repository
+# used to stop it moving.  The tree was pinned, the feeds were not, so the
+# build was a function of the calendar.  It worked once and never again, and
+# because each feed only moves sometimes, every failed attempt looked like a
+# different problem: cycle counts moved, dangling references appeared and
+# disappeared, and each one was chased as if it were the cause.
+#
+# A raw commit id cannot go in the feed URL — `scripts/feeds` uses
+# `git clone --branch <ref>`, which takes a branch or tag NAME and rejects an
+# object id with `fatal: Remote branch <sha> not found`.  So it is applied here
+# instead, to the checkout `scripts/feeds update` has just made.
+#
+# Empty FEEDS_SNAPSHOT_DATE means "follow the branches", which is right for a
+# build whose job is to notice upstream breakage and wrong for a build whose
+# job is to produce the same image twice.
+pin_all_feeds() {
+	local cutoff="${FEEDS_SNAPSHOT_DATE:-}"
+	if [ -z "$cutoff" ]; then
+		warn "FEEDS_SNAPSHOT_DATE is unset - feeds follow their branch heads, so this build is NOT reproducible"
+		return 0
+	fi
+
+	log "Pinning feeds to their state at ${cutoff}"
+
+	local dir name rev have moved=0
+	for dir in "${SRC}"/feeds/*/; do
+		[ -d "${dir}.git" ] || continue
+		name="$(basename "$dir")"
+
+		# The QModem feed has its own knob and its own function; doing it twice
+		# would just make the two disagree.  Its commit is inside this window
+		# anyway, so the snapshot date and QMODEM_PINNED_REVISION agree by
+		# construction as long as both are maintained together.
+		if [ "$name" = "qmodem" ]; then
+			continue
+		fi
+
+		rev="$(git -C "$dir" rev-list -1 --before="$cutoff" HEAD 2>/dev/null || true)"
+
+		if [ -z "$rev" ]; then
+			# Most likely a shallow clone: `rev-list --before` cannot see past
+			# the clone boundary.  Deepen once, then retry.  Both forms are
+			# attempted because --unshallow errors on a complete repository.
+			git -C "$dir" fetch --unshallow -q origin 2>/dev/null ||
+				git -C "$dir" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' 2>/dev/null ||
+				true
+			rev="$(git -C "$dir" rev-list -1 --before="$cutoff" HEAD 2>/dev/null || true)"
+		fi
+
+		if [ -z "$rev" ]; then
+			warn "  feed '${name}': no commit at or before ${cutoff}; leaving it on the branch head"
+			continue
+		fi
+
+		have="$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo '')"
+		if [ "$have" = "$rev" ]; then
+			log "  ${name}: already at ${rev:0:8}"
+			continue
+		fi
+
+		if ! git -C "$dir" -c advice.detachedHead=false checkout -q -f "$rev" 2>/dev/null; then
+			warn "  feed '${name}': cannot check out ${rev:0:8}; leaving it on the branch head"
+			continue
+		fi
+
+		# Assert rather than assume - a silent no-op here would put us straight
+		# back in the calendar-dependent build this function exists to remove.
+		if [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo '')" != "$rev" ]; then
+			die "feed '${name}' did not move to ${rev:0:8} - the pin is not in effect"
+		fi
+
+		log "  ${name}: ${have:0:8} -> ${rev:0:8}"
+		moved=$((moved + 1))
+	done
+
+	log "Feeds pinned to ${cutoff} (${moved} moved)"
 }
 
 # Check the QModem feed out at QMODEM_PINNED_REVISION, if one is configured.
