@@ -125,6 +125,27 @@ QMODEM_PINNED_REVISION="${QMODEM_PINNED_REVISION:-}"
 #   one out for no gain.
 FEEDS_SNAPSHOT_DATE="${FEEDS_SNAPSHOT_DATE:-}"
 
+# ★ Derive the feed cutoff from the tree itself, so the two can never disagree.
+#
+# The problem this solves is structural, not a bad value.  FEEDS_SNAPSHOT_DATE
+# and OPENWRT_PINNED_REVISION are two independent numbers that both have to name
+# the same moment, and nothing in the repository enforces that.  A scheduled
+# build runs with OPENWRT_TRACK=latest, so the tree moves every week while this
+# date stays where it was last put.  The result: the firmware's baseline
+# advances but the built-in apk repository keeps serving packages frozen at
+# whatever day the date was last edited.
+#
+# With this on, pin_all_feeds() reads the upstream checkout's own commit time
+# and rolls the feeds back to that instant, so "tree and feeds are from the same
+# moment" holds by construction in BOTH modes: a `latest` tree gets the feeds
+# from the week it was fetched, a `pinned` tree gets the feeds from its pin.
+# One drift source instead of two.
+#
+# Default off, deliberately: it changes what every scheduled build compiles, so
+# it is turned on by a verified run and not by the commit that adds it.  When
+# on it WINS over FEEDS_SNAPSHOT_DATE - that date is ignored, not merged.
+FEEDS_FOLLOW_TREE="${FEEDS_FOLLOW_TREE:-false}"
+
 # The ddimension WWAN dialer feed (wwand, wwand-qmi/mbim/ncm/mhi/esim,
 # luci-app-wwand, luci-proto-wwand).  Installed only when ENABLE_WWAND=true;
 # see write_feeds_conf() for why the feed is conditional rather than always on.
@@ -1004,6 +1025,18 @@ prepare_feeds() {
 # job is to produce the same image twice.
 pin_all_feeds() {
 	local cutoff="${FEEDS_SNAPSHOT_DATE:-}"
+
+	# See FEEDS_FOLLOW_TREE in the variable block.  Derived here rather than in
+	# upstream.env because only a checkout can answer the question, and this
+	# runs after the tree has been fetched - so the answer is the revision this
+	# very build is about to compile, not last week's.
+	if is_true "${FEEDS_FOLLOW_TREE}"; then
+		cutoff="$(git -C "${SRC}" log -1 --format=%cI HEAD 2>/dev/null || true)"
+		[ -n "$cutoff" ] ||
+			die "FEEDS_FOLLOW_TREE is on but ${SRC} has no readable HEAD commit time - refusing to guess a feed cutoff"
+		log "FEEDS_FOLLOW_TREE: feed cutoff taken from the tree: ${cutoff}"
+	fi
+
 	if [ -z "$cutoff" ]; then
 		warn "FEEDS_SNAPSHOT_DATE is unset - feeds follow their branch heads, so this build is NOT reproducible"
 		return 0
