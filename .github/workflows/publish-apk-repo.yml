@@ -1,0 +1,59 @@
+# Publish the apk package repository to GitHub Pages WITHOUT re-running the
+# 5-hour firmware build.
+#
+# Why this exists: the Pages site was recreated once (stale custom domain
+# cleanup), which wiped the previous deployment, and the only job in
+# build.yml that deploys it needs the artifact of the *same* run — meaning
+# the normal recovery path was a full rebuild.  This workflow instead pulls
+# the already-built `apk-repo` artifact from any past run and deploys it.
+#
+# Manual trigger only:
+#   gh workflow run publish-apk-repo.yml -f run_id=<构建 run ID>
+
+name: 发布 apk 软件包仓库（免重跑构建）
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'apk-repo 工件所在的构建 run ID'
+        required: true
+        default: '36568281572'
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 发布 apk 仓库
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 下载 apk-repo 工件（跨 run）
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-repo
+          path: apk-repo
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      - name: 打包 Pages 工件
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apk-repo
+
+      - name: 部署到 Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
