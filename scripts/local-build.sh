@@ -81,6 +81,12 @@ ENABLE_QMODEM="${ENABLE_QMODEM:-false}"
 QMODEM_REPO_URL="${QMODEM_REPO_URL:-https://github.com/FUjr/QModem.git}"
 QMODEM_REPO_BRANCH="${QMODEM_REPO_BRANCH:-main}"
 
+# The ddimension WWAN dialer feed (wwand, wwand-qmi/mbim/ncm/mhi/esim,
+# luci-app-wwand, luci-proto-wwand).  Installed only when ENABLE_WWAND=true;
+# see write_feeds_conf() for why the feed is conditional rather than always on.
+WWAND_REPO_URL="${WWAND_REPO_URL:-https://github.com/ddimension/openwrt-repo.git}"
+WWAND_REPO_BRANCH="${WWAND_REPO_BRANCH:-main}"
+
 # OpenAppFilter — destan19/OpenAppFilter (appfilter userspace + kmod-oaf +
 # luci-app-oaf).  Not in any official feed; pulled in as its own feed.
 ENABLE_OAF="${ENABLE_OAF:-false}"
@@ -621,13 +627,33 @@ prepare_source() {
 }
 
 write_feeds_conf() {
-	# The base feeds are always present.  The qmodem feed is *conditional*:
-	# luci-app-mt5700m hard-depends on ubus-at-daemon and sms-tool_q, and those
-	# two packages exist only there.  ENABLE_QMODEM needs the same feed for the
-	# modem stack itself (qmodem, quectel-CM-5G-M, luci-app-qmodem-next).  OAF
-	# is its own third-party feed, needed only when the app filter is wanted.
+	# The base feeds are always present.  Every third-party feed is conditional,
+	# and each is appended only when a package from it is actually going to be
+	# built:
+	#
+	#   wwand  - the ddimension WWAN dialer itself (wwand, luci-app-wwand, ...).
+	#            Appended for ENABLE_WWAND only.  This feed must NOT be installed
+	#            on a QModem or mt5700m build: it carries libubus-lua-async,
+	#            which declares PROVIDES:=libubus-lua together with
+	#            CONFLICTS:=libubus-lua, and package-metadata.pl turns that pair
+	#            into a Kconfig loop that makes defconfig drop the whole qmodem
+	#            dependency chain.  The long note in feeds.conf.default has the
+	#            full chain.
+	#   qmodem - luci-app-mt5700m hard-depends on ubus-at-daemon and sms-tool_q,
+	#            which exist only there; ENABLE_QMODEM needs the same feed for
+	#            the modem stack itself (qmodem, quectel-CM-5G-M,
+	#            luci-app-qmodem-next).
+	#   oaf    - its own third-party feed, needed only when the app filter is
+	#            wanted.
 	{
 		cat "${ROOT_DIR}/feeds.conf.default"
+		if is_true "$ENABLE_WWAND"; then
+			printf '\n# Added because ENABLE_WWAND=true. The H5000M WWAN dialer (wwand and\n'
+			printf '# its qmi/mbim/ncm/mhi backends) lives only in this feed. Deliberately\n'
+			printf '# absent when wwand is off: see feeds.conf.default for the Kconfig loop\n'
+			printf '# its libubus-lua-async package creates against libubus-lua.\n'
+			printf 'src-git wwand %s;%s\n' "$WWAND_REPO_URL" "$WWAND_REPO_BRANCH"
+		fi
 		if is_true "$ENABLE_MT5700M"; then
 			printf '\n# Added because ENABLE_MT5700M=true. luci-app-mt5700m hard-depends on\n'
 			printf '# ubus-at-daemon and sms-tool_q, which are only packaged here.\n'
@@ -776,8 +802,11 @@ verify_oaf_feed() {
 verify_wwand_feed() {
 	local feed="${SRC}/feeds/wwand" mk pkg
 
+	# The feed is only installed when ENABLE_WWAND=true, so its absence on any
+	# other build is the expected state, not a problem to report.
 	if [ ! -d "$feed" ]; then
-		warn "wwand feed is not present — ENABLE_WWAND will fail its package check"
+		is_true "$ENABLE_WWAND" &&
+			warn "wwand feed is not present — ENABLE_WWAND will fail its package check"
 		return 0
 	fi
 

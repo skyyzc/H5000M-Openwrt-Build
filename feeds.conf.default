@@ -16,12 +16,19 @@ src-git routing https://github.com/openwrt/routing.git;master
 src-git telephony https://github.com/openwrt/telephony.git;master
 src-git video https://github.com/openwrt/video.git;master
 
-# wwand - the H5000M WWAN dialer (ddimension).
-# The H5000M's built-in module is a TD Tech MT5700M (USB 3466:3301) that
-# enumerates as a cdc_ncm device with AT side channels; wwand drives it through
-# its NCM backend natively (no comgt-ncm, no ModemManager, no uqmi). The same
-# package set covers QMI / MBIM / PCIe-MHI modules in the USB and M.2 slots,
-# which is why every backend is enabled by default.
-# Provides: wwand, wwand-qmi, wwand-mbim, wwand-ncm, wwand-mhi, wwand-esim,
-# luci-app-wwand, luci-proto-wwand.
-src-git wwand https://github.com/ddimension/openwrt-repo.git;main
+# NOTE FOR EDITORS: the wwand feed (ddimension/openwrt-repo) used to live here
+# unconditionally. It is now appended by write_feeds_conf() in
+# scripts/local-build.sh, only when ENABLE_WWAND=true.
+# Why it had to move: the feed carries libubus-lua-async, which declares
+# PROVIDES:=libubus-lua together with CONFLICTS:=libubus-lua. package-metadata.pl
+# turns that pair into a Kconfig loop:
+#     symbol PACKAGE_libubus-lua is selected by PACKAGE_libubus-lua-async
+#     symbol PACKAGE_libubus-lua-async depends on PACKAGE_libubus-lua
+# and kconfig resolves a loop by dropping a symbol. The symbol it drops takes
+# the whole qmodem dependency chain with it, so on a QModem build (where
+# ENABLE_WWAND is forced off anyway) defconfig silently discarded qmodem,
+# luci-app-qmodem-next and luci-app-qmodem-generic. verify_config() caught it
+# and refused to ship firmware, which is how this was found.
+# A feed whose packages are wanted must not be dropped; a feed that is not
+# wanted must not be installed at all. wwand is the latter whenever QModem or
+# luci-app-mt5700m owns the data path, so it is conditional now.
