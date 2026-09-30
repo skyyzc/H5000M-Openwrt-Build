@@ -63,6 +63,13 @@ run_profile default env
 run_profile mt5700m env ENABLE_WWAND=false ENABLE_MT5700M=true
 run_profile minimal env ENABLE_UPNP=false ENABLE_ADBLOCK=false ENABLE_FANCONTROL=false ENABLE_NETMODE=false
 run_profile all-optional env ENABLE_DOCKERMAN=true ENABLE_NIKKI=true ENABLE_EBPF_PROXY_KERNEL=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true ENABLE_ADBLOCK=true
+# Passwall off.  Both switches default to true, so the `default` profile only
+# ever exercises the ON path — and OFF is the branch that can fail silently:
+# a bare `is_true "$X" && emit_service ...` is a failing command when the test
+# is false, which aborts the whole build under `set -e`.  This profile is what
+# would catch a regression to that shape.  It is cheap: the front-end trees are
+# still cloned, only the emit and INCLUDE_* config change.
+run_profile no-passwall env ENABLE_PASSWALL=false ENABLE_PASSWALL2=false
 
 if [ "$PROFILE_SET" = "full" ]; then
 	run_profile services env ENABLE_DOCKERMAN=true ENABLE_ADGUARDHOME=true

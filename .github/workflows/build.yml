@@ -21,9 +21,20 @@ on:
         options: [github-hosted, self-hosted]
         default: github-hosted
       enable_wwand:
-        description: '5G 拨号器 ddimension wwand'
+        description: '5G 拨号器 ddimension wwand —— 默认关闭：本机是 RG520N-CN + QModem，wwand 会与它抢数据面'
+        # Default false, and it matters more than it looks.
+        #
+        # The scheduled run takes the `|| 'true'` branch below, so a `true`
+        # default here meant the weekly build silently re-enabled wwand — and
+        # with it the ddimension feed, whose libubus-lua-async turns
+        # PROVIDES/CONFLICTS:=libubus-lua into a Kconfig loop that makes
+        # defconfig drop the entire QModem chain.  verify_config() then refused
+        # the build, which is how it was caught.
+        #
+        # wwand is mutually exclusive with QModem anyway (resolve_modem_stack
+        # enforces it), so a true default here only ever produced failures.
         type: boolean
-        default: true
+        default: false
       enable_qmodem:
         description: '5G 拨号器 QModem(FUjr) 栈 —— 启用后 wwand 自动关闭（RG520N-CN 走 QMI）'
         type: boolean
@@ -414,7 +425,7 @@ jobs:
           # turned off.
           ENABLE_FANCONTROL: 'true'
           ENABLE_NETMODE: 'true'
-          ENABLE_WWAND: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_wwand) || 'true' }}
+          ENABLE_WWAND: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_wwand) || 'false' }}
           ENABLE_QMODEM: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_qmodem) || 'true' }}
           ENABLE_OAF: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_oaf) || 'true' }}
           ENABLE_HIGOROS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_higoros) || 'true' }}
@@ -434,6 +445,32 @@ jobs:
           ENABLE_MOSDNS: 'true'
           ENABLE_HOMEPROXY: 'false'
           ENABLE_ADGUARDHOME: ${{ vars.ENABLE_ADGUARDHOME || 'false' }}
+          # Passwall / Passwall2 — the front-ends and the whole core set they
+          # depend on, built into this project's own apk repository so a single
+          # `apk add luci-app-passwall` on the device is all it takes.
+          #
+          # VARIABLES, not dispatch inputs, and the reason is a hard GitHub
+          # limit: `workflow_dispatch` accepts at most 10 inputs and this
+          # workflow already declares 12.  Two more would make 14, and GitHub
+          # rejects the excess rather than failing loudly.  These two are also
+          # a per-repository decision that nobody flips per run — exactly the
+          # case the ENABLE_OPENCLASH comment above describes — so vars is
+          # where they belong.  Set them under Settings -> Secrets and
+          # variables -> Actions -> Variables to turn either off.
+          #
+          # Default true: they are repository-only (=m), so they cost image
+          # size nothing; see the ENABLE_PASSWALL block in local-build.sh.
+          #
+          # ★ Turning these OFF is not a supported configuration end to end.
+          # The publish gate below ("front-ends a user may install") and
+          # verify-apk-repo.sh both require luci-app-passwall, luci-app-passwall2
+          # and their zh-cn translations to be present in the repository, with
+          # no condition on this variable — so a build with either switch off
+          # would assemble a smaller repository and then fail the gate, after
+          # three hours.  They exist as variables so the decision is visible and
+          # version-controlled, not because flipping them is routine.
+          ENABLE_PASSWALL: ${{ vars.ENABLE_PASSWALL || 'true' }}
+          ENABLE_PASSWALL2: ${{ vars.ENABLE_PASSWALL2 || 'true' }}
           # Optional, diagnostic.  `make world` reaches package/luci-app-* about
           # 160 minutes in, so a failure there costs a whole three-hour run to
           # find.  Naming packages here builds them (and their dependencies)

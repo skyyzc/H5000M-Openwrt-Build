@@ -62,7 +62,14 @@ ENABLE_NETMODE="${ENABLE_NETMODE:-true}"
 # WWAN dialer — ddimension/wwand.  The H5000M's built-in TD Tech MT5700M
 # (3466:3301, cdc_ncm) is dialled by wwand-ncm; the other backends cover QMI,
 # MBIM and PCIe/MHI modules in the USB and M.2 slots.
-ENABLE_WWAND="${ENABLE_WWAND:-true}"
+#
+# Default OFF, matching the workflow input.  The units actually in circulation
+# carry a Quectel RG520N-CN and are dialled by QModem, which is mutually
+# exclusive with wwand on the data path — so a `true` default here could only
+# ever produce a build that defconfig rejects.  It also drags in the ddimension
+# feed, whose libubus-lua-async declares CONFLICTS:=libubus-lua and turns that
+# into a Kconfig dependency loop.
+ENABLE_WWAND="${ENABLE_WWAND:-false}"
 
 # luci-app-mt5700m — FAN789's panel + NCM/DHCP dialer for the same module.
 # MUTUALLY EXCLUSIVE with wwand on the data path: both would drive the MT5700M's
@@ -93,6 +100,28 @@ ENABLE_OAF="${ENABLE_OAF:-false}"
 OAF_REPO_URL="${OAF_REPO_URL:-https://github.com/destan19/OpenAppFilter.git}"
 OAF_REPO_BRANCH="${OAF_REPO_BRANCH:-master}"
 
+# openwrt-passwall — the passwall and passwall2 front-ends plus the core
+# packages they depend on.  Not in any official feed, and this is the main
+# reason this project publishes its own apk repository (see the ENABLE_PASSWALL
+# block further down for the full rationale).
+#
+# THREE repositories, verified 2026-09-30 rather than assumed — the naming is
+# genuinely confusing:
+#
+#   Openwrt-Passwall/openwrt-passwall           luci-app-passwall only
+#   Openwrt-Passwall/openwrt-passwall2          luci-app-passwall2 only
+#   Openwrt-Passwall/openwrt-passwall-packages  the cores both depend on
+#                                              (sing-box, xray-core, geoview,
+#                                              hysteria, chinadns-ng, ...)
+#
+# There is no single "passwall" feed that carries all three; the packages repo
+# says so itself ("luci-app-passwall(2) depends packages").
+#
+# These are cloned into package/ by install_proxy_repos() and are NOT feeds
+# (see the note in write_feeds_conf).  The repositories are named above for the
+# reader; the URLs live in install_proxy_repos(), which is the single place
+# that fetches them, so there is no second copy of a URL here to drift.
+
 # HigoOS preservation — stage higoros-overlay/ (the vendor higorosd backend,
 # its Vue web UI, the userspace fan controller and the MT7992 EEPROM data)
 # into the build tree's files/ directory so the vendor panel keeps working on
@@ -112,6 +141,28 @@ ENABLE_DOCKERMAN="${ENABLE_DOCKERMAN:-false}"
 # install_external_packages().
 ENABLE_NIKKI="${ENABLE_NIKKI:-false}"
 ENABLE_OPENCLASH="${ENABLE_OPENCLASH:-false}"
+
+# Passwall / Passwall2 — the reason this project publishes its own apk
+# repository at all.
+#
+# These are the packages a Chinese user most often wants and least often can
+# get: they are not in the official OpenWrt feeds, and the usual route is a
+# third-party feed or a hand-built .ipk.  Here they are compiled into the
+# project's OWN repository, together with the kmods that only this build can
+# provide — the official snapshot's kmods carry a different vermagic and the
+# kernel on the device refuses them outright.
+#
+# Repository only by default (=m): both front-ends plus their cores are tens of
+# megabytes, and baking every proxy stack into the image would bloat the
+# sysupgrade payload for a feature most owners install one of.  The install is
+# then a single `apk add luci-app-passwall` on the device, from the LuCI package
+# manager or the shell — see H5000M_APK_REPO_URL.
+#
+# The dependency wiring the front-ends need (`+xray-core`, `+sing-box`) and the
+# core-presence assertions are already in .github/workflows/build.yml; these
+# switches are what select the packages the repository is assembled from.
+ENABLE_PASSWALL="${ENABLE_PASSWALL:-true}"
+ENABLE_PASSWALL2="${ENABLE_PASSWALL2:-true}"
 
 # eBPF proxy kernel support.  Nikki-RS's eBPF fast path attaches TC (clsact)
 # programs to the LAN/WAN interfaces and, when cgroup v2 is mounted, cgroup
@@ -667,6 +718,15 @@ write_feeds_conf() {
 			printf '\n# Added because ENABLE_OAF=true. OpenAppFilter is not in any official feed.\n'
 			printf 'src-git oaf %s;%s\n' "$OAF_REPO_URL" "$OAF_REPO_BRANCH"
 		fi
+		# NOTE: passwall / passwall2 / passwall-packages deliberately do NOT get
+		# feed entries here.  They are cloned straight into package/ by
+		# install_proxy_repos() (see clone_and_prune) and that is the only place
+		# they may come from: a src-git entry for the same three repositories
+		# would land in feeds/passwall*/ and `feeds install` would symlink a
+		# SECOND definition of luci-app-passwall into package/feeds/, which does
+		# not build.  The ENABLE_PASSWALL* switches below control the emit and
+		# include config, not the clone — install_proxy_repos already clones
+		# them under ENABLE_REPO_PACKAGES, which is always true here.
 	} >"$SRC/feeds.conf.default"
 }
 
@@ -2687,6 +2747,135 @@ EOF
 
 	emit_service "$ENABLE_ADBLOCK" \
 		adblock luci-app-adblock luci-i18n-adblock-zh-cn
+
+	# ---------------------------------------------------------- passwall ------
+	# The front-ends a Chinese user is most likely to want and least likely to be
+	# able to install from a domestic mirror.  The trees come from
+	# install_proxy_repos() (cloned into package/) and are built into THIS
+	# project's apk repository, so the device installs them with a plain
+	# `apk add`.
+	#
+	# `emit_service ""` keeps them at the repository mode ("m") even when
+	# ENABLE_REPO_PACKAGES is off, because that switch would otherwise set the
+	# mode to "n" and the repository would be missing exactly the packages it
+	# exists to carry.  The two ENABLE_PASSWALL* switches are the real control;
+	# both default to true.
+	#
+	# Both the apps and their cores are listed.  The apps declare their cores
+	# through `+xray-core` / `+sing-box`, and a `+dep` inside a package that is
+	# only =m does not force the dependency to be built — so the cores are named
+	# here as well, or `apk add luci-app-passwall` would resolve to an app with
+	# nothing to run.  build.yml asserts the same cores exist before publishing.
+	#
+	# The i18n packages are separate binaries, not translations inside the app:
+	# without luci-i18n-passwall-zh-cn the page renders in English.
+	#
+	# The two kmod-nft-* entries are the tproxy pieces passwall asks for and the
+	# base image does not carry; firewall4 and nftables-json are already there
+	# (see REQUIRED_PACKAGES).
+	#
+	# Written as `if`, NOT `is_true "$X" && emit_service ...`.  A bare `&&` list
+	# whose left side fails is itself a failing command, and as the last command
+	# of the function it would abort the build under `set -e` every time the
+	# switch is OFF — i.e. exactly for the configuration most people run.  Same
+	# trap as the checksum loop above.
+	if is_true "$ENABLE_PASSWALL"; then
+		emit_service "" luci-app-passwall luci-i18n-passwall-zh-cn
+	fi
+	if is_true "$ENABLE_PASSWALL2"; then
+		emit_service "" luci-app-passwall2 luci-i18n-passwall2-zh-cn
+	fi
+	# The cores and the shared helpers are emitted whenever EITHER front-end is
+	# wanted: passwall2 can drive xray-core just as passwall can, so a build with
+	# only one of them still needs the full core set.
+	#
+	# ★ The helper list is not decoration, it is the UNION of both front-ends'
+	# own LUCI_DEPENDS (verified 2026-09-30 against the upstream Makefiles):
+	#
+	#   luci-app-passwall (PKG_VERSION 26.9.27):
+	#     +coreutils +coreutils-base64 +coreutils-nohup +coreutils-timeout +curl
+	#     +chinadns-ng +dns2socks +dnsmasq-full +ip-full
+	#     +libuci-lua +lua +luci-compat +luci-lib-jsonc
+	#     +microsocks +resolveip +tcping +lyaml
+	#
+	#   luci-app-passwall2 (PKG_VERSION 26.9.16):
+	#     +coreutils +coreutils-base64 +coreutils-nohup +coreutils-timeout +curl
+	#     +ip-full +libuci-lua +lua +luci-compat +luci-lib-jsonc +lyaml
+	#     +resolveip +tcping
+	#     +geoview +v2ray-geoip +v2ray-geosite      <- NOT in passwall's list
+	#     +unzip                                    <- NOT in passwall's list
+	#
+	# Both lists have to be covered, not just passwall's: a build with only
+	# ENABLE_PASSWALL2 on would otherwise emit a luci-app-passwall2 whose
+	# `apk add` cannot resolve v2ray-geoip / v2ray-geosite / unzip.
+	#
+	# Every one of those must be in the repository or `apk add luci-app-passwall`
+	# resolves against a package set that cannot satisfy it.  Most are already
+	# emitted elsewhere in this function (lua, luci-compat, chinadns-ng,
+	# dnsmasq-full via REQUIRED_PACKAGES, ip-full, microsocks/tcping/dns2socks
+	# from the ssr-plus block); the ones listed again here are named so the
+	# passwall block is self-contained and stays correct if that block changes.
+	#
+	# `luci-compat` deserves a callout: passwall is a Lua-era LuCI app, so
+	# without it the page does not render at all under mainline's JS LuCI.
+	if is_true "$ENABLE_PASSWALL" || is_true "$ENABLE_PASSWALL2"; then
+		emit_service "" \
+			xray-core sing-box \
+			geoview v2ray-geoip v2ray-geosite \
+			chinadns-ng hysteria \
+			coreutils coreutils-base64 coreutils-nohup coreutils-timeout \
+			curl resolveip lyaml unzip \
+			libuci-lua lua luci-compat luci-lib-jsonc \
+			microsocks tcping dns2socks \
+			nftables ipt2socks \
+			kmod-nft-tproxy kmod-nft-socket
+	fi
+
+	# ★ The INCLUDE_* switches, pinned OFF — and this is not cosmetic.
+	#
+	# Both front-ends pull their cores through a Kconfig `select`, exactly like
+	# ssr-plus above (see the long note on its INCLUDE_* block): a select forces
+	# its target to =y even when the selecting package is only =m.  Left at their
+	# aarch64 defaults, `luci-app-passwall` would drag xray-core, sing-box,
+	# geoview, hysteria and the rest INTO THE IMAGE while the app itself stayed
+	# in the repository — dependencies in the firmware and the package that
+	# needs them in the apk repo, which is the worst of both.
+	#
+	# Pinned off, the cores are built as =m by the emit above and `apk add
+	# luci-app-passwall` finds every one of them.
+	#
+	# The two transparent-proxy switches are left ON: they only choose between
+	# the iptables and nftables rule generators, the nftables one is what this
+	# firmware uses (firewall4 + nftables-json are in the image), and neither
+	# pulls a package the repository does not already carry.
+	if is_true "$ENABLE_PASSWALL"; then
+		for opt in Geoview Haproxy Hysteria NaiveProxy \
+			Shadowsocks_Rust_Client Shadowsocks_Rust_Server \
+			ShadowsocksR_Libev_Client ShadowsocksR_Libev_Server \
+			Shadow_TLS Simple_Obfs SingBox V2ray_Geodata \
+			V2ray_Plugin Xray Xray_Plugin; do
+			printf 'CONFIG_PACKAGE_luci-app-passwall_INCLUDE_%s=n\n' "$opt" >>"$out"
+		done
+		printf 'CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y\n' >>"$out"
+		printf 'CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=n\n' >>"$out"
+	fi
+	if is_true "$ENABLE_PASSWALL2"; then
+		for opt in Haproxy Shadowsocks_Rust_Client Shadowsocks_Rust_Server \
+			ShadowsocksR_Libev_Client ShadowsocksR_Libev_Server \
+			Simple_Obfs V2ray_Plugin; do
+			printf 'CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_%s=n\n' "$opt" >>"$out"
+		done
+		# passwall2 picks its cores with a choice, not INCLUDE_* switches: one
+		# of Basic_Core_Xray / Basic_Core_SingBox / Basic_Core_All is always
+		# selected.  A choice cannot be turned off, so choose the single-core
+		# option rather than All — Xray is emitted as =m above either way, and
+		# Basic_Core_All would select both cores and defeat the point.
+		printf 'CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_Xray=y\n' >>"$out"
+		printf 'CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_SingBox=n\n' >>"$out"
+		printf 'CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_All=n\n' >>"$out"
+		printf 'CONFIG_PACKAGE_luci-app-passwall2_Nftables_Transparent_Proxy=y\n' >>"$out"
+		printf 'CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy=n\n' >>"$out"
+	fi
 
 	# adblock-fast — the modern, ucode-based implementation.  It is built into
 	# the repository whether or not ENABLE_ADBLOCK is on: the switch installs the
