@@ -15,43 +15,30 @@ src-git luci https://github.com/openwrt/luci.git;master
 src-git routing https://github.com/openwrt/routing.git;master
 src-git telephony https://github.com/openwrt/telephony.git;master
 src-git video https://github.com/openwrt/video.git;master
-# NOTE FOR EDITORS: the video feed IS listed, deliberately, and this is the
-# result of an experiment rather than an oversight.
-# (Blank comment lines are illegal in this file - see the header. The facts
-# below are one paragraph run together on purpose; do not "tidy" it.)
-# It was removed to reduce Kconfig recursive-dependency pressure after upstream
-# dropped the AUDIO_SUPPORT/DISPLAY_SUPPORT gate (da6323e5, de2f69bf, c375123b)
-# and the cycle count jumped 26 -> 166.  The count turned out to be a red
-# herring: the run that last built green had 26 cycles, the run with video
-# removed had 14, and it was the LOWER one that dropped qmodem.
-# So the feed is kept.  Do not remove it to lower the cycle count.
-
-# NOTE FOR EDITORS: the wwand feed (ddimension/openwrt-repo) is deliberately
-# KEPT as an unconditional line, and this is counter-intuitive enough to
-# warrant an explanation, because every other comment in this file argues the
-# opposite for OTHER feeds.  (Blank comment lines are illegal here too.)
-# Read the qmodem history in this order before changing anything here:
-#   a836634 + feeds: video=on,  wwand=on   -> 26 cycles, qmodem SURVIVED
-#   a836634 + feeds: video=off, wwand=off  -> 14 cycles, qmodem DROPPED
-#   a836634 + feeds: video=on,  wwand=off  -> 166 cycles, qmodem DROPPED
-# Those three rows are the whole story.  The cycle count moves 26/14/166 and
-# does not track the outcome at all.  What DOES track the outcome is wwand:
-# every surviving combination has the wwand feed installed, and every dropped
-# one does not.  The wwand feed is the only source of libubus-lua-async, and
-# installing it is what stops Kconfig from dropping the qmodem closure.
-# This contradicts the libubus-lua-async theory further down, so be plain
-# about what is established and what is not:
-#   MEASURED - wwand feed present correlates perfectly with qmodem surviving.
-#   NOT MEASURED - the mechanism, and specifically whether libubus-lua-async
-#                  is the operative package or whether it is any feed at all
-#                  that changes how Kconfig resolves the loop.  A feed with a
-#                  different unrelated package would test that, and has not
-#                  been run.
-#   KNOWN COST - installing an unused dialer (wwand, luci-app-wwand,
-#                  luci-proto-wwand) into a QModem image.  It is dead weight
-#                  and its packages are NOT emitted, so it should not reach
-#                  the firmware image; verify that before shipping.
-# So: do not "clean up" this line, and do not trust a lower cycle count as
-# evidence that qmodem will survive.  Rebuild and check
-# `Verified all emitted packages survived defconfig`.
+# NOTE FOR EDITORS: the video feed IS listed.  It was removed once to reduce
+# Kconfig recursive-dependency pressure after upstream dropped the
+# AUDIO_SUPPORT/DISPLAY_SUPPORT gate (da6323e5, de2f69bf, c375123b), and that
+# was a dead end: the cycle count (26 / 14 / 156 / 178 across the runs) has
+# never predicted whether qmodem survives, and qmodem never appears in any
+# cycle in the first place.  The real cause is upstream 6e638524 - see the
+# OPENWRT_PINNED_REVISION note in configs/upstream.env.  So the feed stays, and
+# no feed-list edit fixes the drop.
+# The wwand feed (ddimension/openwrt-repo) is kept as an unconditional line.
+# The long explanation that used to sit here claimed the feed was what kept
+# qmodem alive, on the strength of three runs in which "wwand present"
+# correlated with "qmodem survived".  THAT WAS WRONG.  The fourth run killed
+# it: with the feed restored and its packages installed, qmodem still dropped.
+# The correlation was two data points wide and one of them was misread.
+# The real cause is upstream and has nothing to do with this feed: see the
+# OPENWRT_PINNED_REVISION note in configs/upstream.env.  Briefly, upstream
+# 6e638524 reordered two calls in scripts/package-metadata.pl, and the group
+# of packages that stops being written into tmp/.config-package.in as a result
+# includes all of QModem.  No feed list changes that.
+# Keep this line only because a wwand build needs the feed and switching it on
+# and off per-target is one more moving part; a QModem build gets the feed
+# installed and does not emit any of its packages.  Removing it changes
+# nothing about qmodem, and the cycle count (26/14/156/178 across the runs) has
+# never predicted the outcome.  Do not tune the feed list to chase it.
 src-git wwand https://github.com/ddimension/openwrt-repo.git;main
+
+
