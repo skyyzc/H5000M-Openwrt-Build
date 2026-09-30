@@ -708,15 +708,16 @@ write_feeds_conf() {
 	# complaints it brings are noise worth tolerating.  Do not "clean up" the
 	# feed list to lower the cycle count; the count does not decide the outcome.
 	# See the MEASURED FACTS block over prune_display_stack() for the data.
+	# wwand is NOT appended here any more.  feeds.conf.default carries it as an
+	# unconditional line on purpose: on a QModem build the feed must still be
+	# *installed* even though ENABLE_WWAND is forced off, because installing it
+	# is what keeps defconfig from dropping the qmodem closure.  The reasoning,
+	# the three-run evidence table and the one experiment that has NOT been run
+	# are all in the feeds.conf.default note above that line.  Appending a
+	# second copy here when ENABLE_WWAND is on would be harmless (scripts/feeds
+	# would update the same feed twice) but pointless.
 	{
 		cat "${ROOT_DIR}/feeds.conf.default"
-		if is_true "$ENABLE_WWAND"; then
-			printf '\n# Added because ENABLE_WWAND=true. The H5000M WWAN dialer (wwand and\n'
-			printf '# its qmi/mbim/ncm/mhi backends) lives only in this feed. Deliberately\n'
-			printf '# absent when wwand is off: see feeds.conf.default for the Kconfig loop\n'
-			printf '# its libubus-lua-async package creates against libubus-lua.\n'
-			printf 'src-git wwand %s;%s\n' "$WWAND_REPO_URL" "$WWAND_REPO_BRANCH"
-		fi
 		if is_true "$ENABLE_MT5700M"; then
 			printf '\n# Added because ENABLE_MT5700M=true. luci-app-mt5700m hard-depends on\n'
 			printf '# ubus-at-daemon and sms-tool_q, which are only packaged here.\n'

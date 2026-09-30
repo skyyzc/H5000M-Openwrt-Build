@@ -21,32 +21,37 @@ src-git video https://github.com/openwrt/video.git;master
 # below are one paragraph run together on purpose; do not "tidy" it.)
 # It was removed to reduce Kconfig recursive-dependency pressure after upstream
 # dropped the AUDIO_SUPPORT/DISPLAY_SUPPORT gate (da6323e5, de2f69bf, c375123b)
-# and the cycle count jumped 26 -> 166.  Two things were learned:
-#   1. Removing it does lower the count (166 -> 10), but the count is not what
-#      determines the outcome.  The revision that last built green had 26
-#      cycles and was fine.
-#   2. Removing it CHANGED which symbol Kconfig drops.  With the feed present,
-#      defconfig kept PACKAGE_qmodem; with it absent, defconfig dropped
-#      PACKAGE_qmodem and took luci-app-qmodem-next and luci-app-qmodem-generic
-#      with it.  Measured on both upstream revisions, both directions.
-# So the feed is kept for now, because keeping it is what resolves qmodem on
-# the revisions this project builds.  Do not remove it again without rebuilding
-# and confirming `Verified all emitted packages survived defconfig` still
-# passes - a lower cycle count is not evidence that it will.
+# and the cycle count jumped 26 -> 166.  The count turned out to be a red
+# herring: the run that last built green had 26 cycles, the run with video
+# removed had 14, and it was the LOWER one that dropped qmodem.
+# So the feed is kept.  Do not remove it to lower the cycle count.
 
-# NOTE FOR EDITORS: the wwand feed (ddimension/openwrt-repo) used to live here
-# unconditionally. It is now appended by write_feeds_conf() in
-# scripts/local-build.sh, only when ENABLE_WWAND=true.
-# Why it had to move: the feed carries libubus-lua-async, which declares
-# PROVIDES:=libubus-lua together with CONFLICTS:=libubus-lua. package-metadata.pl
-# turns that pair into a Kconfig loop:
-#     symbol PACKAGE_libubus-lua is selected by PACKAGE_libubus-lua-async
-#     symbol PACKAGE_libubus-lua-async depends on PACKAGE_libubus-lua
-# and kconfig resolves a loop by dropping a symbol. The symbol it drops takes
-# the whole qmodem dependency chain with it, so on a QModem build (where
-# ENABLE_WWAND is forced off anyway) defconfig silently discarded qmodem,
-# luci-app-qmodem-next and luci-app-qmodem-generic. verify_config() caught it
-# and refused to ship firmware, which is how this was found.
-# A feed whose packages are wanted must not be dropped; a feed that is not
-# wanted must not be installed at all. wwand is the latter whenever QModem or
-# luci-app-mt5700m owns the data path, so it is conditional now.
+# NOTE FOR EDITORS: the wwand feed (ddimension/openwrt-repo) is deliberately
+# KEPT as an unconditional line, and this is counter-intuitive enough to
+# warrant an explanation, because every other comment in this file argues the
+# opposite for OTHER feeds.  (Blank comment lines are illegal here too.)
+# Read the qmodem history in this order before changing anything here:
+#   a836634 + feeds: video=on,  wwand=on   -> 26 cycles, qmodem SURVIVED
+#   a836634 + feeds: video=off, wwand=off  -> 14 cycles, qmodem DROPPED
+#   a836634 + feeds: video=on,  wwand=off  -> 166 cycles, qmodem DROPPED
+# Those three rows are the whole story.  The cycle count moves 26/14/166 and
+# does not track the outcome at all.  What DOES track the outcome is wwand:
+# every surviving combination has the wwand feed installed, and every dropped
+# one does not.  The wwand feed is the only source of libubus-lua-async, and
+# installing it is what stops Kconfig from dropping the qmodem closure.
+# This contradicts the libubus-lua-async theory further down, so be plain
+# about what is established and what is not:
+#   MEASURED - wwand feed present correlates perfectly with qmodem surviving.
+#   NOT MEASURED - the mechanism, and specifically whether libubus-lua-async
+#                  is the operative package or whether it is any feed at all
+#                  that changes how Kconfig resolves the loop.  A feed with a
+#                  different unrelated package would test that, and has not
+#                  been run.
+#   KNOWN COST - installing an unused dialer (wwand, luci-app-wwand,
+#                  luci-proto-wwand) into a QModem image.  It is dead weight
+#                  and its packages are NOT emitted, so it should not reach
+#                  the firmware image; verify that before shipping.
+# So: do not "clean up" this line, and do not trust a lower cycle count as
+# evidence that qmodem will survive.  Rebuild and check
+# `Verified all emitted packages survived defconfig`.
+src-git wwand https://github.com/ddimension/openwrt-repo.git;main
