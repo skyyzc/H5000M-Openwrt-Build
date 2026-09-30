@@ -17,11 +17,11 @@ src-git telephony https://github.com/openwrt/telephony.git;master
 src-git video https://github.com/openwrt/video.git;master
 # NOTE FOR EDITORS: the video feed IS listed, deliberately, and this is the
 # result of an experiment rather than an oversight.
-#
+# (Blank comment lines are illegal in this file - see the header. The facts
+# below are one paragraph run together on purpose; do not "tidy" it.)
 # It was removed to reduce Kconfig recursive-dependency pressure after upstream
 # dropped the AUDIO_SUPPORT/DISPLAY_SUPPORT gate (da6323e5, de2f69bf, c375123b)
 # and the cycle count jumped 26 -> 166.  Two things were learned:
-#
 #   1. Removing it does lower the count (166 -> 10), but the count is not what
 #      determines the outcome.  The revision that last built green had 26
 #      cycles and was fine.
@@ -29,7 +29,6 @@ src-git video https://github.com/openwrt/video.git;master
 #      defconfig kept PACKAGE_qmodem; with it absent, defconfig dropped
 #      PACKAGE_qmodem and took luci-app-qmodem-next and luci-app-qmodem-generic
 #      with it.  Measured on both upstream revisions, both directions.
-#
 # So the feed is kept for now, because keeping it is what resolves qmodem on
 # the revisions this project builds.  Do not remove it again without rebuilding
 # and confirming `Verified all emitted packages survived defconfig` still
