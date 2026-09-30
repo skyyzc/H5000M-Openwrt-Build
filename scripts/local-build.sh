@@ -3530,6 +3530,7 @@ verify_config() {
 		for pkg in "${missing[@]}"; do
 			warn "required package did not survive defconfig: ${pkg}"
 		done
+		dump_defconfig_diagnostics "${missing[@]}"
 		die "Configuration is missing required packages — refusing to build a firmware without ${missing[*]}"
 	fi
 
