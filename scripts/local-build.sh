@@ -739,6 +739,22 @@ write_feeds_conf() {
 		# include config, not the clone — install_proxy_repos already clones
 		# them under ENABLE_REPO_PACKAGES, which is always true here.
 	} >"$SRC/feeds.conf.default"
+
+	# The header of feeds.conf.default warns about this, and it is easy to trip:
+	# scripts/feeds strips comments with `s/#.*$//` and only THEN skips blank
+	# lines, so a lone `#` with nothing after it is not blank after stripping —
+	# it reaches the split, its first field is empty, and the parser dies with
+	#   Syntax error in feeds.conf.default, line N
+	# which aborts `feeds update` and therefore the whole build.  A comment block
+	# is exactly where that happens, so assert it instead of trusting the prose.
+	# Comparing the source comment line count to the generated one catches it at
+	# the point of generation, with the line number, instead of seven minutes
+	# into a CI run.
+	local bad
+	bad="$(grep -nE '^[[:space:]]*#[[:space:]]*$' "$SRC/feeds.conf.default" || true)"
+	if [ -n "$bad" ]; then
+		die "feeds.conf.default has comment-only '#' line(s) that scripts/feeds cannot parse: ${bad//$'\n'/, }. Every comment line needs text after the hash (see the file header)."
+	fi
 }
 
 # `feeds install` symlinks packages into package/feeds/<feed>/ but never removes
