@@ -87,6 +87,10 @@ ENABLE_MT5700M="${ENABLE_MT5700M:-false}"
 ENABLE_QMODEM="${ENABLE_QMODEM:-false}"
 QMODEM_REPO_URL="${QMODEM_REPO_URL:-https://github.com/FUjr/QModem.git}"
 QMODEM_REPO_BRANCH="${QMODEM_REPO_BRANCH:-main}"
+# Commit to check the feed out at, or empty to follow the branch head.  Applied
+# by pin_qmodem_feed() after `feeds install`, not through the feed URL — a raw
+# SHA is not a valid `git clone --branch` argument.  See pin_qmodem_feed().
+QMODEM_PINNED_REVISION="${QMODEM_PINNED_REVISION:-}"
 
 # The ddimension WWAN dialer feed (wwand, wwand-qmi/mbim/ncm/mhi/esim,
 # luci-app-wwand, luci-proto-wwand).  Installed only when ENABLE_WWAND=true;
@@ -937,9 +941,73 @@ prepare_feeds() {
 		die "feeds install failed"
 
 	verify_wwand_feed
+	pin_qmodem_feed
 	fix_qmodem_feed
 	verify_qmodem_feed
 	verify_oaf_feed
+}
+
+# Check the QModem feed out at QMODEM_PINNED_REVISION, if one is configured.
+#
+# This exists because a commit id cannot be written into the feed URL.  The
+# obvious spelling,
+#
+#   src-git qmodem https://github.com/FUjr/QModem.git;<sha>
+#
+# does not work: scripts/feeds clones with `git clone --branch <ref>`, and
+# --branch accepts a branch or tag NAME, never a raw object id.  It fails with
+#
+#   fatal: Remote branch <sha> not found in upstream origin
+#
+# and `feeds update` then dies — before defconfig, before any package check, so
+# the failure looks nothing like a pinning problem.  The feed URL therefore
+# keeps the branch name and the commit is applied here instead, after the
+# checkout exists.
+#
+# Empty QMODEM_PINNED_REVISION means "follow the branch head", which is what a
+# build that is meant to track the feed upstream should do.  A non-empty value
+# is a reproduction knob: the run is then a function of a fixed feed, so a
+# package drop can only come from the tree.
+pin_qmodem_feed() {
+	is_true "$ENABLE_QMODEM" || return 0
+	[ -n "$QMODEM_PINNED_REVISION" ] || return 0
+
+	local feed="${SRC}/feeds/qmodem"
+
+	if [ ! -d "${feed}/.git" ]; then
+		# ENABLE_QMODEM=true is what adds the feed, so this is a real fault
+		# rather than a configuration the caller asked for.
+		die "cannot pin the QModem feed: ${feed} is not a git checkout, but ENABLE_QMODEM=true and QMODEM_PINNED_REVISION is set"
+	fi
+
+	local have
+	have="$(git -C "$feed" rev-parse HEAD 2>/dev/null || echo '')"
+	if [ "$have" = "$QMODEM_PINNED_REVISION" ]; then
+		log "QModem feed already at ${QMODEM_PINNED_REVISION:0:8}"
+		return 0
+	fi
+
+	# Deepen on failure rather than from the start: the feed clone is made by
+	# scripts/feeds and its depth is not ours to choose, so the wanted commit
+	# may not be in the shallow history.  One unshallow retry covers that
+	# without paying for a full fetch on every build.
+	if ! git -C "$feed" fetch --depth 1 origin "$QMODEM_PINNED_REVISION" 2>/dev/null; then
+		log "QModem pin not reachable at depth 1; deepening the feed checkout"
+		git -C "$feed" fetch --unshallow origin ||
+			die "cannot fetch the QModem feed to reach ${QMODEM_PINNED_REVISION}"
+		git -C "$feed" fetch origin "$QMODEM_PINNED_REVISION" ||
+			die "QModem commit ${QMODEM_PINNED_REVISION} is not in the feed — wrong SHA, or the branch was force-pushed"
+	fi
+
+	git -C "$feed" checkout -f FETCH_HEAD ||
+		die "cannot check the QModem feed out at ${QMODEM_PINNED_REVISION}"
+
+	have="$(git -C "$feed" rev-parse HEAD 2>/dev/null || echo '')"
+	[ "$have" = "$QMODEM_PINNED_REVISION" ] ||
+		die "QModem feed pin did not take: wanted ${QMODEM_PINNED_REVISION}, have ${have}"
+
+	log "QModem feed pinned to ${QMODEM_PINNED_REVISION:0:8}"
+	return 0
 }
 
 # Two known upstream defects, both observed in LianXia233's CI (which builds
