@@ -3143,6 +3143,15 @@ EOF
 	#
 	# `luci-compat` deserves a callout: passwall is a Lua-era LuCI app, so
 	# without it the page does not render at all under mainline's JS LuCI.
+	#
+	# One name in the list below is easy to get wrong: it is `nftables-json`,
+	# NOT `nftables`.  Upstream's Makefile declares nftables-nojson and
+	# nftables-json and makes bare `nftables` only a PROVIDES alias, so
+	# CONFIG_PACKAGE_nftables is not a symbol defconfig can set.  This list
+	# carried `nftables` for a while and it went unnoticed because the build
+	# died on the qmodem check before the emitted-name guard below was ever
+	# reached; the moment qmodem survived, the guard caught it.  See also the
+	# note on the nftables-json emit near the top of this function.
 	if is_true "$ENABLE_PASSWALL" || is_true "$ENABLE_PASSWALL2"; then
 		emit_service "" \
 			xray-core sing-box \
@@ -3152,7 +3161,7 @@ EOF
 			curl resolveip lyaml unzip \
 			libuci-lua lua luci-compat luci-lib-jsonc \
 			microsocks tcping dns2socks \
-			nftables ipt2socks \
+			nftables-json ipt2socks \
 			kmod-nft-tproxy kmod-nft-socket
 	fi
 
@@ -3785,11 +3794,28 @@ verify_config() {
 	# upstream rename would otherwise shrink the repository while every check
 	# above stayed green.  tmp/.packageinfo is the build system's own package
 	# list — the same source the emit lists were taken from.
+	#
+	# Report EVERY bad name in one go rather than dying on the first.  This
+	# check cost a full CI round when it reported one name (`nftables`) and
+	# left the rest of the list unexamined — the same one-step-per-round
+	# pattern that made this build feel like it could never be finished.
 	if [ -s "${SRC}/tmp/.packageinfo" ]; then
+		local bad_names=()
+		local pkg
 		for pkg in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
 			grep -qFx "Package: ${pkg}" "${SRC}/tmp/.packageinfo" ||
-				die "emit_service wrote CONFIG_PACKAGE_${pkg}, but no package by that name exists — upstream renamed or removed it; update the emit lists in scripts/local-build.sh"
+				bad_names+=("$pkg")
 		done
+		if [ "${#bad_names[@]}" -gt 0 ]; then
+			warn "emit_service wrote ${#bad_names[@]} name(s) that are not real packages:"
+			for pkg in "${bad_names[@]}"; do
+				warn "  ${pkg}"
+			done
+			warn "a PROVIDES alias is not a package: ask for the concrete variant"
+			warn "(nftables-json rather than nftables, for instance), then update the"
+			warn "emit lists in scripts/local-build.sh"
+			die "emitted package name(s) ${bad_names[*]} do not exist upstream"
+		fi
 		log "Verified ${#EMITTED_PACKAGES[@]} emitted package names exist upstream"
 	else
 		warn "no ${SRC}/tmp/.packageinfo — skipping the emitted-package existence check"
