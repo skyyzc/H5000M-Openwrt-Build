@@ -841,9 +841,32 @@ prune_display_stack() {
 	#    None of these is emitted by this build and nothing that IS emitted
 	#    depends on them, so pruning them removes the cycle without removing
 	#    anything reachable.  Each name is a feed directory, not a package.
+	#
+	#    ★ These are the PARENT directories, and that matters.  The first
+	#    version of this list named only `multimedia/gstreamer1`, which is a
+	#    real directory that really did get pruned - and changed nothing,
+	#    because gstreamer is not nested under `gstreamer1`.  It is six
+	#    SIBLINGS:
+	#
+	#        multimedia/gstreamer1  multimedia/gst1-libav
+	#        multimedia/gst1-plugins-base  multimedia/gst1-plugins-bad
+	#        multimedia/gst1-plugins-good  multimedia/gst1-plugins-ugly
+	#
+	#    so pruning the one still left the other five installed, still emitting
+	#    `libgstreamer1` / `libgst1controller` / `libgst1net` / `gstreamer1-libs`
+	#    as missing dependencies on every `gst1-*`, `grilo*`, `lcdgrilo`,
+	#    `libextractor` and telephony's `baresip` Makefile - hundreds of lines
+	#    of it, and a fresh set of cycles.  Prune the parents, not a leaf.
+	#
+	#    Audited against the emit/required lists: not one package under
+	#    multimedia/ or sound/ is requested by this image (no gstreamer, mpd,
+	#    upmpdcli, squeezelite, pulseaudio, alsa-*, ffmpeg, imagemagick,
+	#    minidlna, motion, tvheadend...), on a headless 5G CPE that has no
+	#    display, no sound card and no camera.  `net/dmapd` is a DLNA media
+	#    server and goes with them.
 	for feed in \
-		multimedia/gstreamer1 \
-		sound/squeezelite \
+		multimedia \
+		sound \
 		net/dmapd; do
 		if [ -d "${SRC}/feeds/packages/${feed}" ]; then
 			log "Pruning feeds/packages/${feed} (Kconfig cycle source, not used by this image)"
