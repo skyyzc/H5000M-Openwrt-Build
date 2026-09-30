@@ -682,6 +682,9 @@ write_feeds_conf() {
 	# and each is appended only when a package from it is actually going to be
 	# built:
 	#
+	#   packages / luci / routing / telephony
+	#          - the official feeds this image is actually built from, all four
+	#            defined in feeds.conf.default.
 	#   wwand  - the ddimension WWAN dialer itself (wwand, luci-app-wwand, ...).
 	#            Appended for ENABLE_WWAND only.  This feed must NOT be installed
 	#            on a QModem or mt5700m build: it carries libubus-lua-async,
@@ -696,6 +699,14 @@ write_feeds_conf() {
 	#            luci-app-qmodem-next).
 	#   oaf    - its own third-party feed, needed only when the app filter is
 	#            wanted.
+	#
+	# NOT here, and deliberately: the official `video` feed.  It is commented
+	# out in feeds.conf.default with the full rationale; in short, its 62
+	# display-class packages are unusable on a headless CPE and, since upstream
+	# removed the AUDIO_SUPPORT/DISPLAY_SUPPORT feature gate, they are what
+	# floods Kconfig with ~140 new recursive-dependency errors (26 -> 166) and
+	# tips it into dropping PACKAGE_qmodem.  See prune_display_stack() below,
+	# which asserts the feed really is gone.
 	{
 		cat "${ROOT_DIR}/feeds.conf.default"
 		if is_true "$ENABLE_WWAND"; then
@@ -760,6 +771,77 @@ prune_stale_feeds() {
 	shopt -u nullglob
 }
 
+# ------------------------------------------------------- display gate --------
+# Upstream used to hide every display/audio package from the Kconfig graph on a
+# target that did not advertise those features.  Three commits removed that
+# (all between a8366342 and 5c8e736, ~58 commits apart):
+#
+#   da6323e5 build: remove the AUDIO_SUPPORT and DISPLAY_SUPPORT symbols
+#   de2f69bf treewide: drop the audio and display target features
+#   c375123b kernel: drop the audio and display feature gates
+#
+# The visible effect on this build is a Kconfig explosion:
+#
+#                        before the drift   after
+#   recursive deps                26          166
+#   PACKAGE_qmodem survived      yes          NO
+#
+# Kconfig resolves a recursive dependency by dropping a symbol, and with ~140
+# extra cycles in the graph the symbol it drops is PACKAGE_qmodem.  That
+# cascades: luci-app-qmodem-next and luci-app-qmodem-generic both depend on
+# qmodem, so all three leave .config and verify_config() refuses to ship.
+#
+# The cycles are not ours and not qmodem's - they are Qt5 (a `choice` whose
+# members gate the symbol the choice itself depends on), SDL, GTK, WPEWebKit,
+# gstreamer, mpd.  None of that runs on a headless 5G CPE.  So the fix is to
+# keep those packages out of the graph: the `video` feed is off entirely (see
+# feeds.conf.default), and the few that live in the `packages` feed are pruned
+# here.  This restores the pre-drift cycle count instead of trying to out-vote
+# Kconfig's symbol dropping.
+#
+# Both halves are asserted rather than assumed: this runs after `feeds update`
+# and dies loudly if the video feed came back (someone re-enabled it) or if a
+# tree still has its checkout, which is exactly the state that breaks the
+# qmodem build.
+prune_display_stack() {
+	local feed
+
+	# 1. The video feed must not be configured at all.  A commented-out line is
+	#    fine; a live src-git line is not.
+	if grep -qE '^[[:space:]]*src-(git|link|svn|hg)[[:space:]]+video[[:space:]]' \
+		"$SRC/feeds.conf.default"; then
+		die "the video feed is enabled in feeds.conf.default — it floods Kconfig with recursive dependencies and makes defconfig drop qmodem. See the feeds.conf.default note before re-enabling it."
+	fi
+
+	# 2. Remove the checkout if an earlier build left one, so nothing can fall
+	#    back to it.  prune_stale_feeds() already dropped the package/ symlinks
+	#    (the feed is unconfigured, so it is pruned there); this drops the tree.
+	if [ -d "${SRC}/feeds/video" ]; then
+		log "Removing the stale feeds/video checkout (display stack is not used on this target)"
+		rm -rf "${SRC}/feeds/video"
+	fi
+
+	# 3. The `packages` feed keeps its own display/audio cycle contributors.
+	#    None of these is emitted by this build and nothing that IS emitted
+	#    depends on them, so pruning them removes the cycle without removing
+	#    anything reachable.  Each name is a feed directory, not a package.
+	for feed in \
+		multimedia/gstreamer1 \
+		sound/squeezelite \
+		net/dmapd; do
+		if [ -d "${SRC}/feeds/packages/${feed}" ]; then
+			log "Pruning feeds/packages/${feed} (Kconfig cycle source, not used by this image)"
+			rm -rf "${SRC}/feeds/packages/${feed}"
+		fi
+	done
+
+	# The php8 Config.in cycle (PHP8_INTL <-> PACKAGE_php8) is left alone on
+	# purpose: it exists in the healthy tree too, and luci-app-nekobox needs
+	# php8 when that switch is on.  A package-metadata.pl round-trip, not a
+	# removal, is the right fix there — out of scope for a build recipe.
+	return 0
+}
+
 # A feed named in feeds.conf.default but absent from feeds/ means the feed set
 # changed since the last update (e.g. qmodem was just switched on).  Skipping the
 # update then would make `feeds install` fail with a confusing error.
@@ -792,6 +874,12 @@ prepare_feeds() {
 		run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds update -a ||
 			die "feeds update failed — refusing to build a firmware with missing packages"
 	fi
+
+	# Must run AFTER `feeds update` (the video checkout only exists once the
+	# feed has been fetched at least once, and this has to be able to delete it)
+	# and BEFORE `feeds install` (so the pruned packages are never symlinked
+	# into package/feeds/ and never reach Kconfig).
+	prune_display_stack
 
 	log "Installing feeds"
 	run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds install -a ||

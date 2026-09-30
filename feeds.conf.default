@@ -14,7 +14,37 @@ src-git packages https://github.com/openwrt/packages.git;master
 src-git luci https://github.com/openwrt/luci.git;master
 src-git routing https://github.com/openwrt/routing.git;master
 src-git telephony https://github.com/openwrt/telephony.git;master
-src-git video https://github.com/openwrt/video.git;master
+# src-git video https://github.com/openwrt/video.git;master
+#
+# NOTE FOR EDITORS: the video feed is deliberately NOT listed. It carries 62
+# packages - Qt5, SDL2/SDL3, Wayland, Westone, wlroots, Mesa, Vulkan, LLVM,
+# Plymouth, WPEWebKit, gzdoom, vice - and this is a headless 5G CPE, so not one
+# of them can be installed on it, let alone used.
+#
+# Two reasons it has to stay out:
+#   1. Build time. Those 62 packages drag in LLVM, Mesa and the whole Qt5
+#      toolchain, which is a large slice of a multi-hour build for zero gain.
+#   2. Kconfig. Upstream 5c8e736 ("kirkwood: drop kernel 6.12 support") lands
+#      right after da6323e5 "build: remove the AUDIO_SUPPORT and
+#      DISPLAY_SUPPORT symbols" / de2f69bf "treewide: drop the audio and
+#      display target features" / c375123b "kernel: drop the audio and display
+#      feature gates". Those commits deleted the build-feature gate that used
+#      to keep every display/audio package OUT of the Kconfig graph on a target
+#      without those features. With the gate gone, ~140 packages that used to
+#      be filtered now emit Kconfig symbols, and along with them ~140 NEW
+#      "recursive dependency detected" errors (26 before the drift, 166 after).
+#      Kconfig resolves a cycle by DROPPING a symbol, and with the graph that
+#      polluted it dropped PACKAGE_qmodem - which cascaded into
+#      luci-app-qmodem-next and luci-app-qmodem-generic (they depend on it) and
+#      killed the build in verify_config.
+#      feeds/video/frameworks/qt5/qt5base/Config.in:18 is the FIRST cycle Kconfig
+#      prints (a `choice` whose members gate the very symbol the choice depends
+#      on), so the video feed is the single largest contributor.
+#
+# If a display-class package is ever wanted here, add the feed back behind a
+# switch in write_feeds_conf() the way wwand is - do NOT re-add it
+# unconditionally, or the qmodem build breaks again on any upstream tree that
+# still carries the removed gate.
 
 # NOTE FOR EDITORS: the wwand feed (ddimension/openwrt-repo) used to live here
 # unconditionally. It is now appended by write_feeds_conf() in
