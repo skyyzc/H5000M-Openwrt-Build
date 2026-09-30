@@ -3442,6 +3442,65 @@ config_symbol_present() {
 	grep -qE "^CONFIG_PACKAGE_$1=[ym]$" "$SRC/.config"
 }
 
+# When an emitted package does not survive defconfig, print the evidence that
+# identifies which emitted symbol dragged it down.  Two ideas, both cheap and
+# both taken from what the log already has on disk:
+#
+#   1. The emitted order.  Kconfig resolves a recursive dependency by dropping
+#      whichever member it walks into last, and "last" is decided by the order
+#      symbols appear in tmp/.config-package.in — which package-metadata.pl
+#      writes by category.  So the emitted packages that DID survive, and the
+#      position of the first failure, narrow the search enormously.
+#   2. Which emitted packages appear in a recursive-dependency block at all.
+#      If none of the lost ones do (this was true when qmodem was being
+#      dropped — qmodem appeared in no cycle), then the drop is a secondary
+#      effect and the culprit is something that shares a dependency closure
+#      with them, not the lost package itself.
+#
+# This exists because three CI rounds were spent guessing at feed lists when
+# the answer was in the config counts (123 emitted before, 127 after).
+dump_defconfig_diagnostics() {
+	local lost=("$@")
+	local log="${ROOT_DIR}/build.log"
+	local generated="${SRC}/tmp/.config-package.in"
+
+	log "── defconfig diagnostics ─────────────────────────────────────────"
+
+	if [ -s "$generated" ]; then
+		local in_graph=0
+		local pkg
+		for pkg in "${lost[@]}"; do
+			if grep -qE "^config PACKAGE_${pkg}\b" "$generated"; then
+				in_graph=$((in_graph + 1))
+			fi
+		done
+		log "  of the ${#lost[@]} lost package(s), ${in_graph} still exist as a Kconfig symbol"
+		log "  (0 means they were never in the graph — the drop happened upstream of kconfig)"
+	else
+		warn "  no ${generated} to inspect"
+	fi
+
+	if [ -s "$log" ]; then
+		local cycles
+		cycles="$(grep -c 'recursive dependency detected' "$log" 2>/dev/null || echo 0)"
+		log "  recursive dependencies in the graph: ${cycles}"
+		local pkg hit
+		for pkg in "${lost[@]}"; do
+			if grep -q "PACKAGE_${pkg}\b" "$log" 2>/dev/null; then
+				hit="$(grep -m1 -n "recursive dependency detected" "$log" >/dev/null 2>&1 && echo yes || echo no)"
+				log "  ${pkg}: appears in build.log (${hit})"
+			else
+				log "  ${pkg}: does NOT appear in build.log at all"
+			fi
+		done
+		log "  → if a lost package never appears in any cycle, look for the"
+		log "    dependency closure it SHARES with something that does."
+	fi
+
+	log "  emitted=${#EMITTED_PACKAGES[@]} required=${#REQUIRED_PACKAGES[@]}"
+	log "──────────────────────────────────────────────────────────────────"
+}
+
 # A package emitted as `=m` (repository only) must not come out of defconfig as
 # `=y`.  The image would then carry a front-end whose core lives only in the
 # repository — the panel installs and cannot start a node, the exact failure
@@ -3562,10 +3621,22 @@ verify_config() {
 	#
 	# Checking here turns a three-hour discovery into a few-minute one, and
 	# names the package instead of leaving it to a downstream symptom.
+	local missing=()
 	for pkg in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
-		config_symbol_present "$pkg" ||
-			die "emitted package ${pkg} did not survive defconfig, so it would be missing from the published repository. Look for a Kconfig 'recursive dependency' involving it (kconfig resolves such a loop by dropping a symbol) or a dependency nothing satisfies."
+		config_symbol_present "$pkg" || missing+=("$pkg")
 	done
+	if [ "${#missing[@]}" -gt 0 ]; then
+		# Print the context that identifies the culprit before dying.  A
+		# dropped symbol is almost never the cause of its own drop — Kconfig
+		# drops whichever member of a recursive dependency it walks into last
+		# — so the useful evidence is the ORDER: which emitted symbols came
+		# out intact and which did not.  When the lost set is a contiguous
+		# block of one feature's packages, that feature is the one whose
+		# dependency closure contains the loop.
+		warn "these emitted packages did not survive defconfig: ${missing[*]}"
+		dump_defconfig_diagnostics "${missing[@]}"
+		die "emitted package(s) ${missing[*]} did not survive defconfig, so they would be missing from the published repository. Look for a Kconfig 'recursive dependency' involving them (kconfig resolves such a loop by dropping a symbol) or a dependency nothing satisfies."
+	fi
 	log "Verified all emitted packages survived defconfig"
 
 	log "Verified ${#REQUIRED_PACKAGES[@]} required packages and target profile ${TARGET_PROFILE}"
