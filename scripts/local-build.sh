@@ -3699,51 +3699,80 @@ config_symbol_present() {
 }
 
 # When an emitted package does not survive defconfig, print the evidence that
-# identifies which emitted symbol dragged it down.  Two ideas, both cheap and
-# both taken from what the log already has on disk:
+# identifies what actually happened to it.
 #
-#   1. The emitted order.  Kconfig resolves a recursive dependency by dropping
-#      whichever member it walks into last, and "last" is decided by the order
-#      symbols appear in tmp/.config-package.in — which package-metadata.pl
-#      writes by category.  So the emitted packages that DID survive, and the
-#      position of the first failure, narrow the search enormously.
-#   2. Which emitted packages appear in a recursive-dependency block at all.
-#      If none of the lost ones do (this was true when qmodem was being
-#      dropped — qmodem appeared in no cycle), then the drop is a secondary
-#      effect and the culprit is something that shares a dependency closure
-#      with them, not the lost package itself.
+# ★ MEASURED FALSE NEGATIVE, fixed 2026-10-07.  This used to decide whether a
+#   lost package "still exists as a Kconfig symbol" with
 #
-# This exists because three CI rounds were spent guessing at feed lists when
-# the answer was in the config counts (123 emitted before, 127 after).
+#       grep -qE "^config PACKAGE_${pkg}\b" tmp/.config-package.in
+#
+#   and that pattern could NEVER match.  package-metadata.pl writes the line as
+#   `\tconfig PACKAGE_<pkg>` - print_package_config_category() does `print "\t"`
+#   before the keyword - so anchoring at `^` asks for a column that the file
+#   never uses.  The counter therefore read 0 on every failure and the log
+#   announced "0 still exist as a Kconfig symbol ... never in the graph", with
+#   two rounds (10-07) spent hunting a graph problem that did not exist.
+#   Verified against scripts/package-metadata.pl at the revision that failed.
+#
+#   Two lessons worth keeping:
+#     1. A guard that reports the same answer for every input is not a guard.
+#        This one said "0" whether the symbol existed or not.  When a diagnostic
+#        becomes the basis for a theory, test the diagnostic against a known
+#        positive first.
+#     2. `.config` is the authority for "survived defconfig" (grep at column 0,
+#        written by kconfig).  `.config-package.in` is the *input* graph and is
+#        indented by a tab.  Comparing the two with the same anchored pattern
+#        mixes up two different files with two different conventions.
+#
+# The three states have three different causes, so they are printed apart:
+#
+#   no stanza at all           -> package-metadata.pl never emitted the symbol
+#   stanza + ".config is not set" -> defconfig turned it off: `depends on ...` = n
+#   stanza + "=m"              -> it survived, but only into the repository, so
+#                                 the `=y` check is the thing that is wrong
 dump_defconfig_diagnostics() {
 	local lost=("$@")
 	local log="${ROOT_DIR}/build.log"
 	local generated="${SRC}/tmp/.config-package.in"
+	local configline="${SRC}/.config"
 
 	log "── defconfig diagnostics ─────────────────────────────────────────"
 
-	if [ -s "$generated" ]; then
-		local in_graph=0
-		local pkg
-		for pkg in "${lost[@]}"; do
-			if grep -qE "^config PACKAGE_${pkg}\b" "$generated"; then
-				in_graph=$((in_graph + 1))
-			fi
-		done
-		log "  of the ${#lost[@]} lost package(s), ${in_graph} still exist as a Kconfig symbol"
-		log "  (0 means they were never in the graph — the drop happened upstream of kconfig)"
-	else
-		warn "  no ${generated} to inspect"
-	fi
+	# Leading whitespace is optional on purpose: kconfig itself accepts an
+	# indented `config`, and package-metadata.pl always writes one.
+	local in_graph=0
+	local pkg
+	for pkg in "${lost[@]}"; do
+		grep -qE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null &&
+			in_graph=$((in_graph + 1))
+	done
+	log "  of the ${#lost[@]} lost package(s), ${in_graph} have a Kconfig stanza in ${generated##*/}"
+	log "  (0 means package-metadata.pl never emitted them - the drop is upstream of kconfig)"
+
+	for pkg in "${lost[@]}"; do
+		local stanza state
+		stanza="$(grep -cE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null || true)"
+		state="$(grep -m1 -E "^#?[[:space:]]?CONFIG_PACKAGE_${pkg}(=| is not set|$)" "$configline" 2>/dev/null || true)"
+		log "  ${pkg}: stanza=${stanza:-0} .config=[${state:-<no line>}]"
+	done
+	# The whole stanza, so the reason a symbol was dropped is readable rather
+	# than inferred: `depends on` on an undefined symbol evaluates to n and takes
+	# the package with it.
+	for pkg in "${lost[@]}"; do
+		grep -qE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null || continue
+		log "  --- stanza PACKAGE_${pkg}"
+		sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" |
+			grep -E "depends on|select|default|tristate|bool" | head -12
+	done
 
 	if [ -s "$log" ]; then
 		local cycles
 		cycles="$(grep -c 'recursive dependency detected' "$log" 2>/dev/null || echo 0)"
 		log "  recursive dependencies in the graph: ${cycles}"
-		local pkg hit
+		local hit
 		for pkg in "${lost[@]}"; do
 			if grep -q "PACKAGE_${pkg}\b" "$log" 2>/dev/null; then
-				hit="$(grep -m1 -n "recursive dependency detected" "$log" >/dev/null 2>&1 && echo yes || echo no)"
+				hit="$(grep -m1 -q "recursive dependency detected" "$log" 2>/dev/null && echo yes || echo no)"
 				log "  ${pkg}: appears in build.log (${hit})"
 			else
 				log "  ${pkg}: does NOT appear in build.log at all"

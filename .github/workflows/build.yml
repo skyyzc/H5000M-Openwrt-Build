@@ -1581,4 +1581,163 @@ jobs:
       # the final path component only (a pattern with `/` never matches).
       tarball_glob: '*-targz-rootfs.tar.gz'
 
+  # ---------------------------------------------------------------------------
+  # Layer 6 of the anti-drift design: a failed run has to say so.
+  #
+  # WHY THIS EXISTS
+  #
+  #   The weekly build runs with nobody watching.  It failed on 2026-10-05 and
+  #   again on 10-07, and the only trace was a red mark on the Actions tab.  A
+  #   gate that reports into a page nobody opens is not a gate — the mechanism
+  #   that was supposed to protect the project was itself unobserved.
+  #
+  #   The report goes to an ISSUE rather than to a webhook or a chat message
+  #   because an issue needs no extra secret: the token every run already holds
+  #   can write issues.  It also survives the run, lands in the owner's GitHub
+  #   notification inbox and mail, and can be closed when the cause is fixed,
+  #   which makes it a written record of what broke and when.  Adding a chat
+  #   webhook later is one more step next to this one, not a redesign.
+  #
+  #   `on: workflow_run` would be the natural trigger and is NOT available:
+  #   zizmor rejects it as a dangerous trigger (see attest.yml).  So the guard
+  #   has to live inside this workflow and hang off the jobs it reports on.
+  #
+  #   continue-on-error, deliberately: a bug in the reporter must not turn one
+  #   failure into two.
+  # ---------------------------------------------------------------------------
+  report-failure:
+    name: 构建失败告警
+    needs: [build, publish-apk-repo, script-test]
+    # Real failures only.  A run cancelled by hand — a superseded dispatch, a
+    # concurrency cancellation — is not drift and must not open an issue.
+    if: ${{ failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      contents: read
+      # Read the failure-logs artifact this job exists to summarise.
+      actions: read
+      # Open, or comment on, the tracking issue.
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # This job has no checkout, so `gh` has no `.git` to read the repository
+      # from.  Every call below also passes `--repo` explicitly, but GH_REPO is
+      # what the repository's own contract check looks for, and it is the
+      # difference between "the alert fires" and "the alert dies with 'not a
+      # git repository'" — the latter being exactly the silent-degradation this
+      # job exists to prevent.
+      GH_REPO: ${{ github.repository }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      ISSUE_TITLE: '[自动构建失败] H5000M 主线 OpenWrt'
+    steps:
+      # The build job uploads `build-logs` precisely when it fails, so this is
+      # the highest-signal source.  Downloading it is best-effort on purpose:
+      # a failure that happened BEFORE the build stage has no logs at all, and
+      # that is the case where the alert matters most, so a missing artifact
+      # must never stop it.
+      - name: Download the failure logs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        continue-on-error: true
+        with:
+          name: build-logs
+          path: build-logs
+
+      - name: Write the report
+        run: |
+          set -uo pipefail
+          report=report.md
+          {
+            echo '自动构建失败。本 issue 由工作流自动创建或追加，根因修好后直接关闭即可。'
+            echo
+            echo "- 运行: ${RUN_URL}"
+            echo "- 触发: ${GITHUB_EVENT_NAME}"
+            echo "- 提交: ${GITHUB_SHA}"
+            echo "- 分支: ${GITHUB_REF_NAME}"
+            echo "- 时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo
+          } > "$report"
+
+          # Read only the lines that name a cause.  This project's build emits
+          # its own `h5000m:error` prefixes next to the upstream text, and the
+          # four drift forms each have a signature line (see the notes in
+          # scripts/local-build.sh and configs/upstream.env):
+          #   dangling ref  -> "has a dependency on '<x>', which does not exist"
+          #   group id      -> "id of group <x> collides"
+          #   Kconfig loop  -> "recursive dependency detected" + "0 still exist"
+          #   feed syntax   -> "Syntax error in feeds.conf.default"
+          if [ -f build-logs/build.log ]; then
+            {
+              echo '### 构建阶段诊断（build.log 摘录）'
+              echo
+              echo '```text'
+              grep -aE \
+                'h5000m:error|h5000m:|of the [0-9]+ lost package|recursive dependency detected|did not survive defconfig|still exist as a Kconfig symbol|Syntax error in feeds\.conf|id of group|Failed to build tmp/\.config-package\.in|ERROR: .* failed to build' \
+                build-logs/build.log | tail -80 || true
+              echo
+              echo '（以上为过滤后的摘录，完整日志见运行页面的 build-logs 工件）'
+              echo '```'
+              echo
+            } >> "$report"
+          else
+            {
+              echo '### 构建阶段诊断'
+              echo
+              echo '没有 build-logs 工件 —— 失败发生在构建阶段之前或之外（例如工作流解析、checkout、缓存）。请看运行页面的原始日志。'
+              echo
+            } >> "$report"
+          fi
+
+          # The fallback is a mechanism that already exists, not a new one: the
+          # pinned pair in configs/upstream.env is the last combination that
+          # built cleanly.  Saying so HERE is the whole point — on 10-05 the
+          # recovery took a day of rediscovery because nothing pointed at it.
+          {
+            echo '### 回退到已验证的上游组合'
+            echo
+            echo '如果是上游漂移导致（悬空引用 / 组 ID 冲突 / Kconfig 环），先出一版能用的固件：'
+            echo
+            echo '```sh'
+            echo 'scripts/dispatch-build.sh -f pinned=true'
+            echo '```'
+            echo
+            echo '它用 `configs/upstream.env` 里的 `OPENWRT_PINNED_REVISION` + `FEEDS_SNAPSHOT_DATE`（成对，必须同时生效）。'
+            echo '注意：这只是止血。钉版会同时冻住上游的安全更新，根因仍需修掉后再回到 `pinned=false`。'
+            echo
+          } >> "$report"
+
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          echo "report written: $(wc -l < "$report") lines"
+
+      - name: Open or update the tracking issue
+        run: |
+          set -uo pipefail
+          report=report.md
+
+          # Match on the exact title instead of `--search`: the title is CJK and
+          # GitHub's issue search tokeniser does not reliably match CJK phrases,
+          # so a search-based dedup would silently open a new issue per failure
+          # and bury the history it exists to keep.
+          number="$(
+            gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
+              | jq -r --arg t "$ISSUE_TITLE" '.[] | select(.title == $t) | .number' \
+              | head -n1
+          )"
+
+          if [ -n "$number" ]; then
+            echo "existing open issue #${number} - appending this failure to it"
+            {
+              echo '---'
+              echo
+              echo "又一次失败：$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+              echo
+              cat "$report"
+            } > comment.md
+            gh issue comment "$number" --repo "$REPO" --body-file comment.md
+          else
+            echo "no open issue for this title - opening one"
+            gh issue create --repo "$REPO" --title "$ISSUE_TITLE" --body-file "$report"
+          fi
+
 # higoros-qmodem: registered workflow (see QModem/OAF/HigoOS inputs above).
