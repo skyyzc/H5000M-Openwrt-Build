@@ -745,12 +745,15 @@ write_feeds_conf() {
 	#            defined in feeds.conf.default.
 	#   wwand  - the ddimension WWAN dialer itself (wwand, luci-app-wwand, ...).
 	#            Appended for ENABLE_WWAND only.  This feed must NOT be installed
-	#            on a QModem or mt5700m build: it carries libubus-lua-async,
-	#            which declares PROVIDES:=libubus-lua together with
-	#            CONFLICTS:=libubus-lua, and package-metadata.pl turns that pair
-	#            into a Kconfig loop that makes defconfig drop the whole qmodem
-	#            dependency chain.  The long note in feeds.conf.default has the
-	#            full chain.
+	#            on a QModem or mt5700m build.  Two independent mechanisms have
+	#            now been observed taking the qmodem closure out from under it:
+	#              * libubus-lua-async declares PROVIDES:=libubus-lua together
+	#                with CONFLICTS:=libubus-lua, and package-metadata.pl turns
+	#                that pair into a Kconfig loop;
+	#              * pcie_mhi 1.6.0, added 2026-10-06T15:39Z, brought
+	#                kmod-pcie_mhi_nss, which closes a three-symbol cycle with
+	#                PACKAGE_qmodem, and kconfig then drops every symbol in it.
+	#            feeds.conf.default carries the measured chain for the second.
 	#   qmodem - luci-app-mt5700m hard-depends on ubus-at-daemon and sms-tool_q,
 	#            which exist only there; ENABLE_QMODEM needs the same feed for
 	#            the modem stack itself (qmodem, quectel-CM-5G-M,
@@ -766,16 +769,21 @@ write_feeds_conf() {
 	# complaints it brings are noise worth tolerating.  Do not "clean up" the
 	# feed list to lower the cycle count; the count does not decide the outcome.
 	# See the MEASURED FACTS block over prune_display_stack() for the data.
-	# wwand is NOT appended here any more.  feeds.conf.default carries it as an
-	# unconditional line on purpose: on a QModem build the feed must still be
-	# *installed* even though ENABLE_WWAND is forced off, because installing it
-	# is what keeps defconfig from dropping the qmodem closure.  The reasoning,
-	# the three-run evidence table and the one experiment that has NOT been run
-	# are all in the feeds.conf.default note above that line.  Appending a
-	# second copy here when ENABLE_WWAND is on would be harmless (scripts/feeds
-	# would update the same feed twice) but pointless.
+	# wwand was briefly unconditional, in feeds.conf.default rather than here,
+	# on the strength of three runs in which "wwand installed" correlated with
+	# "qmodem survived".  That correlation inverted on 2026-10-07 - the note in
+	# feeds.conf.default dates it to the minute - so it is conditional again,
+	# which is what the variable block at the top of this file has said all
+	# along.  On a QModem image nothing in that feed is used and one of its
+	# packages can take the modem stack out; on an ENABLE_WWAND image the feed
+	# is the product itself.
 	{
 		cat "${ROOT_DIR}/feeds.conf.default"
+		if is_true "$ENABLE_WWAND"; then
+			printf '\n# Added because ENABLE_WWAND=true. The ddimension WWAN dialer,\n'
+			printf '# and the pcie_mhi/rmnet-nss drivers it needs, live only here.\n'
+			printf 'src-git wwand %s;%s\n' "$WWAND_REPO_URL" "$WWAND_REPO_BRANCH"
+		fi
 		if is_true "$ENABLE_MT5700M"; then
 			printf '\n# Added because ENABLE_MT5700M=true. luci-app-mt5700m hard-depends on\n'
 			printf '# ubus-at-daemon and sms-tool_q, which are only packaged here.\n'
@@ -896,22 +904,34 @@ prune_stale_feeds() {
 # switch is on.  A package-metadata.pl round-trip, not a removal, is the right
 # fix there — out of scope for a build recipe.
 prune_display_stack() {
-	# Nothing is pruned.  The name is kept because prepare_feeds() and the
-	# commit history refer to it, and because a stale feeds/video checkout from
-	# a build predating the restore is still worth clearing - it would be
-	# reinstalled by `feeds update` anyway, but leaving it avoids a confusing
-	# intermediate state.
+	# Nothing in the package list is pruned.  The name is kept because
+	# prepare_feeds() and the commit history refer to it, and because clearing
+	# a stale feeds/ checkout is still worth doing: `feeds update` would
+	# reinstall a feed the file lists anyway, but a checkout of a feed the file
+	# does NOT list is not harmless - `feeds install -a` symlinks everything
+	# under feeds/ into package/feeds/, so a leftover directory keeps feeding
+	# packages into a build that asked for none of them.
+	#
+	# That is not hypothetical for wwand, which became conditional on
+	# ENABLE_WWAND again on 2026-10-07.  The runner restores a cached build
+	# directory from an earlier run, and a cached feeds/wwand would be
+	# reinstalled on a QModem build - which is precisely the tree state whose
+	# Kconfig cycle drops qmodem (see the note over write_feeds_conf).  A fix
+	# that only works on a cold cache is not a fix.
 	#
 	# Deliberately NOT done here:
 	#   * enabling/disabling the video feed - that is feeds.conf.default's job
 	#   * pruning multimedia/ or sound/ - see fact 5 above
-	local _video="${SRC}/feeds/video"
+	local _feed
 
-	if [ -d "$_video" ] && ! grep -qE '^[[:space:]]*src-(git|link|svn|hg)[[:space:]]+video[[:space:]]' \
-		"$SRC/feeds.conf.default"; then
-		log "Removing feeds/video (feed is unconfigured; leftover from an earlier build)"
-		rm -rf "$_video"
-	fi
+	for _feed in video wwand; do
+		if [ -d "${SRC}/feeds/${_feed}" ] && ! grep -qE \
+			"^[[:space:]]*src-(git|link|svn|hg)[[:space:]]+${_feed}[[:space:]]" \
+			"${SRC}/feeds.conf.default"; then
+			log "Removing feeds/${_feed} (feed is unconfigured; leftover from an earlier build)"
+			rm -rf "${SRC}/feeds/${_feed}"
+		fi
+	done
 
 	return 0
 }
@@ -1222,9 +1242,17 @@ verify_wwand_feed() {
 
 	# The feed is only installed when ENABLE_WWAND=true, so its absence on any
 	# other build is the expected state, not a problem to report.
+	#
+	# Written as an `if` rather than `is_true X && warn ...` on purpose.  Under
+	# `set -e` a short-circuited AND-list is a failing command, so the shorter
+	# form would abort the whole build on exactly the case this branch exists
+	# for - a QModem image, where ENABLE_WWAND is false and the feed is meant
+	# to be gone.  It never fired before because the feed used to be present
+	# unconditionally; making it conditional walked straight into it.
 	if [ ! -d "$feed" ]; then
-		is_true "$ENABLE_WWAND" &&
+		if is_true "$ENABLE_WWAND"; then
 			warn "wwand feed is not present — ENABLE_WWAND will fail its package check"
+		fi
 		return 0
 	fi
 
