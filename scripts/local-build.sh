@@ -3765,6 +3765,32 @@ dump_defconfig_diagnostics() {
 			grep -E "depends on|select|default|tristate|bool" | head -12
 	done
 
+	# ★ And the VALUE of every symbol those gates name, which is what turns "the
+	# depends are not satisfied" into "THIS clause is not satisfied".
+	#
+	# Measured 2026-10-07: the stanza existed and `.config` held no line for it at
+	# all - kconfig writes nothing for a symbol whose prompt is invisible - so the
+	# package was not "dropped", it was never selectable.  The gates are all of
+	# the form `!(<switch we control>) || <target feature>`, and reading their
+	# values is the difference between guessing which one is n and knowing.
+	#
+	# A symbol with no `CONFIG_...=` line is reported as unset, which in kconfig
+	# means n - that is the normal value of a target feature this board lacks.
+	local syms sym value
+	for pkg in "${lost[@]}"; do
+		grep -qE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null || continue
+		syms="$(sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" |
+			grep -E "^[[:space:]]*depends on " |
+			grep -oE "[A-Za-z_][A-Za-z0-9_]*" |
+			grep -vE "^(depends|on|if|then|else|menu|config|tristate|bool|default)$" |
+			sort -u)"
+		log "  --- gate values for PACKAGE_${pkg}"
+		for sym in $syms; do
+			value="$(grep -m1 -E "^CONFIG_${sym}=" "$configline" 2>/dev/null | cut -d= -f2)"
+			log "    ${sym}=${value:-<unset → n>}"
+		done
+	done
+
 	if [ -s "$log" ]; then
 		local cycles
 		cycles="$(grep -c 'recursive dependency detected' "$log" 2>/dev/null || echo 0)"
