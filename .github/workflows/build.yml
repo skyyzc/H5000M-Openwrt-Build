@@ -1660,21 +1660,28 @@ jobs:
           } > "$report"
 
           # Read only the lines that name a cause.  This project's build emits
-          # its own `h5000m:error` prefixes next to the upstream text, and the
-          # four drift forms each have a signature line (see the notes in
+          # its own `h5000m:` prefixes next to the upstream text, and each of the
+          # drift forms has a signature line (see the notes in
           # scripts/local-build.sh and configs/upstream.env):
           #   dangling ref  -> "has a dependency on '<x>', which does not exist"
           #   group id      -> "id of group <x> collides"
-          #   Kconfig loop  -> "recursive dependency detected" + "0 still exist"
+          #   Kconfig loop  -> "recursive dependency detected"
+          #   unsatisfiable -> "stanza=1 .config=[<no line>]" + the gate values
           #   feed syntax   -> "Syntax error in feeds.conf.default"
+          #
+          # The ANSI codes are stripped, not kept: workflow logs are coloured for
+          # a terminal, and pasted into an issue those escapes render as
+          # `^[[1;33m` noise in front of every line that matters.
           if [ -f build-logs/build.log ]; then
             {
               echo '### 构建阶段诊断（build.log 摘录）'
               echo
               echo '```text'
               grep -aE \
-                'h5000m:error|h5000m:|of the [0-9]+ lost package|recursive dependency detected|did not survive defconfig|still exist as a Kconfig symbol|Syntax error in feeds\.conf|id of group|Failed to build tmp/\.config-package\.in|ERROR: .* failed to build' \
-                build-logs/build.log | tail -80 || true
+                'h5000m:error|h5000m:|of the [0-9]+ lost package|has a Kconfig stanza|stanza=|gate values for|recursive dependency detected|did not survive defconfig|still exist as a Kconfig symbol|Syntax error in feeds\.conf|id of group|Failed to build tmp/\.config-package\.in|ERROR: .* failed to build' \
+                build-logs/build.log |
+                sed 's/\x1b\[[0-9;]*m//g' |
+                tail -100 || true
               echo
               echo '（以上为过滤后的摘录，完整日志见运行页面的 build-logs 工件）'
               echo '```'
@@ -1696,7 +1703,7 @@ jobs:
           {
             echo '### 回退到已验证的上游组合'
             echo
-            echo '如果是上游漂移导致（悬空引用 / 组 ID 冲突 / Kconfig 环），先出一版能用的固件：'
+            echo '如果是上游漂移或上游构建系统变更导致（悬空引用 / 组 ID 冲突 / Kconfig 环 / 条件依赖不再可满足），先出一版能用的固件：'
             echo
             echo '```sh'
             echo 'scripts/dispatch-build.sh -f pinned=true'
