@@ -1519,6 +1519,31 @@ jobs:
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
 
   # ---------------------------------------------------------------------------
+  # Reusable Workflow call: sign the index the deploy above just published.
+  #
+  # It is a separate workflow because ossf/scorecard-action refuses to publish
+  # results from a workflow containing any other job with `id-token:`, and both
+  # this and Scorecard need OIDC.  Called from here rather than triggered by
+  # `workflow_run` for two reasons: that trigger is on zizmor's
+  # dangerous-triggers list, and a call ties the timing to the deploy instead
+  # of to a schedule that used to fire hours before the index existed.
+  #
+  # A called workflow's job can only use permissions the CALLER already has,
+  # so the scopes have to be granted here even though attest.yml declares them
+  # too.  See the note on script-test below for how that fails when it is
+  # missed: startup_failure, no jobs, no error text.
+  # ---------------------------------------------------------------------------
+  attest:
+    name: 签发构建证明与 SBOM
+    needs: [publish-apk-repo]
+    permissions:
+      contents: read
+      id-token: write        # OIDC: the signing identity, no long-lived secret
+      attestations: write    # store the attestation
+      packages: read
+    uses: ./.github/workflows/attest.yml
+
+  # ---------------------------------------------------------------------------
   # Reusable Workflow call: run the firmware's own first-boot scripts against
   # the real aarch64 uci under qemu.
   #

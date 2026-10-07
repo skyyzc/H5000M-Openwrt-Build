@@ -23,15 +23,24 @@ name: 签发构建证明与 SBOM
 # The move also fixes the timing.  As a job in security.yml this ran on that
 # workflow's own schedule - Mondays 05:30 UTC - which is *before* the firmware
 # build (04:00 UTC nominal, hours later in queue) has published anything, so
-# it attested the previous week's index.  Triggering off the build's
-# completion attests what the build actually published.
+# it attested the previous week's index.  Being called by the build instead
+# attests what the build actually published.
+
+# WHY `workflow_call` AND NOT `workflow_run`
+# -----------------------------------------
+# `workflow_run` was the first attempt, and zizmor's `dangerous-triggers`
+# check rejects it (attest.yml:29:1: use of fundamentally insecure workflow
+# trigger) - correctly, in general: a run it fires executes with the default
+# branch's permissions and secrets and can be reached from an event the
+# project does not control.  A direct call has neither problem, and it makes
+# the ordering structural rather than hoped for: this cannot start before the
+# job that deployed the index has finished.
 
 on:
-  # After the firmware build, so the attested index is the one that run just
-  # deployed.  The name must match build.yml's `name:` exactly.
-  workflow_run:
-    workflows: ["构建 H5000M 主线 OpenWrt 固件"]
-    types: [completed]
+  # Called by build.yml once the apk repository has been deployed, so the
+  # attested subject is that very deployment.
+  workflow_call:
+  # Kept for re-attesting whatever is currently published, without a build.
   workflow_dispatch:
 
 # No permissions by default; the single job below widens them.
@@ -40,8 +49,6 @@ permissions: {}
 jobs:
   attest:
     name: 签发构建证明与 SBOM
-    # A failed build publishes nothing, so there is nothing to attest.
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
