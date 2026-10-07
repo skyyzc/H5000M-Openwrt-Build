@@ -104,13 +104,22 @@ for path in sorted(wf_dir.glob("*.yml")):
             continue
 
         callee = load(target)
-        wc = (callee.get("on") or {}).get("workflow_call")
-        if wc is None:
+        # `workflow_call:` with nothing underneath is a legal declaration - the
+        # callee simply takes no inputs - and PyYAML collapses it to None.  So
+        # `is None` cannot tell "declared, no inputs" from "not declared", and
+        # it reported the former as a missing contract.  That went unnoticed
+        # because the only other callee here, reusable-script-test.yml, happens
+        # to declare inputs and so never took the empty branch; the first
+        # no-input callee (attest.yml) hit it immediately.  Membership in the
+        # `on` mapping answers the question that was actually being asked.
+        on_block = callee.get("on") or {}
+        if "workflow_call" not in on_block:
             problems.append(
                 f"{path.relative_to(root)}: job {job_id} 调用了 {uses}，"
                 f"但它没有声明 on.workflow_call"
             )
             continue
+        wc = on_block.get("workflow_call") or {}
 
         # 2a) with: 的键必须是被调用方声明的输入
         declared = as_set(wc.get("inputs"))
