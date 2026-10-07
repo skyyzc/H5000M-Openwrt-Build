@@ -3865,6 +3865,73 @@ dump_defconfig_diagnostics() {
 					log "      ${sym} = ${value}"
 				done
 				log "        ^ from: ${clause#*depends on }"
+
+				# ★ And single out the shape that actually kills a package.
+				#
+				# A clause that is JUST a symbol - no `||`, no `&&`, no `!` - is a
+				# HARD REQUIREMENT, not a conditional one: if that symbol is n the
+				# package is not "dropped", it is invisible, and kconfig then
+				# writes no line for it at all.  Measured 2026-10-07, this is what
+				# broke QModem:
+				#
+				#     depends on PACKAGE_input-support      <- the whole clause
+				#
+				# `input-support` is a new upstream meta-package (the Hardware
+				# support family) that defaults to n, and package-metadata.pl
+				# re-emits a selected package's hard requirements into the
+				# selecting package's stanza.  It sits at the END of a 71-line
+				# stanza, next to sixty `select` lines, and reads like a no-op.
+				#
+				# Naming it as a class is the point: the guarded clauses above it
+				# cannot fail on this board, so a reader who checks the first ten
+				# lines concludes "all gates are satisfiable" and looks elsewhere.
+				case "$clause" in
+				*'||'* | *'&&'* | *'!'*) ;;
+				*)
+					local bare bareval bareline
+					bare="${clause#*depends on }"
+					bare="${bare%% *}"
+					# Same two shapes as the loop above, and the same reason: an
+					# unset symbol and one kconfig wrote `is not set` for are both
+					# n, and only the third shape (no line at all) means the
+					# symbol does not exist.
+					bareline="$({ grep -m1 -E "^#?[[:space:]]?CONFIG_${bare}(=| is not set)" "$configline" 2>/dev/null || true; })"
+					bareval=""
+					case "$bareline" in
+					'') bareval="n" ;;
+					\#*) bareval="n" ;;
+					*=*) bareval="${bareline#*=}" ;;
+					esac
+					if [ "$bareval" = "n" ]; then
+						log "        ★ HARD REQUIREMENT (no || and no !): ${bare} is n."
+						log "          Nothing else in this stanza can matter while that is true:"
+						log "          a false 'depends on' hides the prompt, and kconfig then"
+						log "          writes NO line for PACKAGE_${pkg} at all."
+						log "          Every package whose stanza carries that identical line is"
+						log "          blocked by the same single cause:"
+						# Through `log`, one line at a time: an `awk | head` straight to
+						# stdout would be visible on the Actions page and INVISIBLE to
+						# the failure report, which reads build.log.  The list is the
+						# whole value of this check - it turns "qmodem is broken" into
+						# "these packages are, and they share one cause" - so it has to
+						# reach the same place the rest of the diagnostics do.
+						while IFS= read -r victim; do
+							[ -n "$victim" ] || continue
+							log "            ${victim}"
+						done <<<"$(awk -v pat="$bare" '
+							{
+								t = $0
+								sub(/^[ \t]+/, "", t)
+								split(t, a, /[ \t]+/)
+								if (a[1] == "config" || a[1] == "menuconfig") cur = a[2]
+								if (t == "depends on " pat) {
+									if (cur != "" && cur != last) { print cur; last = cur }
+								}
+							}
+						' "$generated" 2>/dev/null | head -30 || true)"
+					fi
+					;;
+				esac
 			done <<<"$clauses"
 			log "  --- if every clause above reads true, the obstruction is not in"
 			log "      this stanza: check whether the symbol is a choice member or"
