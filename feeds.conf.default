@@ -32,24 +32,19 @@ src-git video https://github.com/openwrt/video.git;master
 # makes the feeds a fixed input, and pin_all_feeds() applies it.
 # The video feed stays. Removing it changes the cycle count and changes nothing
 # about qmodem, and the count does not decide the outcome anyway.
-#
 # wwand is NOT listed here.  It used to be an unconditional line, on the
 # strength of three runs in which "wwand installed" correlated with "qmodem
 # survived".  That was a correlation, and on 2026-10-07 it inverted:
-#
 #   ddimension/openwrt-repo 7889f403, 2026-10-06T15:39Z
 #     "pcie_mhi: update to 1.6.0 and add NSS support, add rmnet-nss (#1)"
-#
 # added kmod-pcie_mhi_nss, which depends on kmod-mhi-pci-generic, which
 # PACKAGE_qmodem selects - while PACKAGE_qmodem depends on kmod-pcie_mhi_nss.
 # Kconfig reported the cycle and then dropped every symbol in it, so qmodem,
 # luci-app-qmodem-next and luci-app-qmodem-generic all left the graph:
-#
 #   tmp/.config-package.in:34403:error: recursive dependency detected!
 #     symbol PACKAGE_kmod-pcie_mhi_nss depends on PACKAGE_kmod-mhi-pci-generic
 #     symbol PACKAGE_kmod-mhi-pci-generic is selected by PACKAGE_qmodem
 #     symbol PACKAGE_qmodem depends on PACKAGE_kmod-pcie_mhi_nss
-#
 # Nothing in this feed is used on a QModem image, and one of its packages can
 # take the whole modem stack out, so write_feeds_conf() appends it for
 # ENABLE_WWAND=true only - which is what the WWAND_REPO_URL block in
