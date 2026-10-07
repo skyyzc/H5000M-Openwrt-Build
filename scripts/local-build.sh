@@ -3761,8 +3761,17 @@ dump_defconfig_diagnostics() {
 	for pkg in "${lost[@]}"; do
 		grep -qE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null || continue
 		log "  --- stanza PACKAGE_${pkg}"
-		sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" |
-			grep -E "depends on|select|default|tristate|bool" | head -12
+		# `|| true` on every stage that is allowed to match nothing: this
+		# function runs under `set -e` and `set -o pipefail`, where a grep that
+		# finds no match is a FAILED COMMAND, and a failed stage aborts the
+		# whole build before the `die` below can print why.  Measured the hard
+		# way on 2026-10-07: the first version of the gate-value loop below
+		# killed the run right after its heading, so the log lost the error
+		# message the diagnostics exist to precede.
+		{ sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" ||
+			true; } |
+			{ grep -E "depends on|select|default|tristate|bool" || true; } | head -12 ||
+			true
 	done
 
 	# ★ And the VALUE of every symbol those gates name, which is what turns "the
@@ -3779,14 +3788,15 @@ dump_defconfig_diagnostics() {
 	local syms sym value
 	for pkg in "${lost[@]}"; do
 		grep -qE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null || continue
-		syms="$(sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" |
-			grep -E "^[[:space:]]*depends on " |
-			grep -oE "[A-Za-z_][A-Za-z0-9_]*" |
-			grep -vE "^(depends|on|if|then|else|menu|config|tristate|bool|default)$" |
-			sort -u)"
+		syms="$({ sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" ||
+			true; } |
+			{ grep -E "^[[:space:]]*depends on " || true; } |
+			{ grep -oE "[A-Za-z_][A-Za-z0-9_]*" || true; } |
+			{ grep -vE "^(depends|on|if|then|else|menu|config|tristate|bool|default)$" || true; } |
+			{ sort -u || true; })"
 		log "  --- gate values for PACKAGE_${pkg}"
 		for sym in $syms; do
-			value="$(grep -m1 -E "^CONFIG_${sym}=" "$configline" 2>/dev/null | cut -d= -f2)"
+			value="$({ grep -m1 -E "^CONFIG_${sym}=" "$configline" 2>/dev/null || true; } | cut -d= -f2)"
 			log "    ${sym}=${value:-<unset → n>}"
 		done
 	done
@@ -3841,7 +3851,12 @@ verify_config() {
 		for pkg in "${missing[@]}"; do
 			warn "required package did not survive defconfig: ${pkg}"
 		done
-		dump_defconfig_diagnostics "${missing[@]}"
+		# `|| true`: the diagnostics must never be able to REPLACE the error they
+		# precede.  Measured 2026-10-07 - the first version of them died on its own
+		# `set -e` bug and the run ended with no `h5000m:error` line at all, only a
+		# bare exit 1.  A diagnostic that can mask the failure is worse than none.
+		dump_defconfig_diagnostics "${missing[@]}" ||
+			warn "defconfig diagnostics did not complete; read the log above"
 		die "Configuration is missing required packages — refusing to build a firmware without ${missing[*]}"
 	fi
 
