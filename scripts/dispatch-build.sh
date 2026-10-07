@@ -52,10 +52,34 @@ log "target commit: ${want:0:8}"
 #
 # A push that has returned does not mean GitHub's ref store is already serving
 # the new value to every API.  Wait for the read to agree instead of assuming.
+#
+# ★ Since the promotion job (build.yml: advance-pin) commits on this branch by
+#   itself, "the remote points at HEAD" is no longer the only normal state: after
+#   a green probe the remote is exactly one commit AHEAD, and that commit is the
+#   pin advancement. Without the fast-forward below this script would abort on
+#   that - i.e. the automation would break the very command used to recover from
+#   a bad week, and it would break it precisely when someone is in a hurry.
+#
+#   The invariant this check protects is "never dispatch a build of code you have
+#   not seen", so the answer is to fast-forward, not to loosen the check. A
+#   genuinely diverged branch - a local commit that was never pushed - still
+#   stops here, which is the case the check was written for.
 have=""
 for _ in $(seq 1 30); do
 	have="$(git ls-remote origin "refs/heads/${BRANCH}" 2>/dev/null | cut -f1)"
 	[ "$have" = "$want" ] && break
+
+	if [ -n "$have" ] && git fetch -q origin "$BRANCH" 2>/dev/null &&
+		git merge-base --is-ancestor "$want" FETCH_HEAD 2>/dev/null; then
+		log "origin/${BRANCH} is ${have:0:8}, one or more commits ahead of local ${want:0:8}"
+		log "fast-forwarding so the run compiles what you have seen"
+		git merge --ff-only --quiet FETCH_HEAD ||
+			die "local ${BRANCH} cannot fast-forward to origin/${BRANCH:0:8} (uncommitted changes?); commit or stash first"
+		want="$(git rev-parse HEAD)"
+		log "local is now ${want:0:8}"
+		break
+	fi
+
 	sleep 2
 done
 [ "$have" = "$want" ] ||

@@ -1059,8 +1059,16 @@ pin_all_feeds() {
 
 	if [ -z "$cutoff" ]; then
 		warn "FEEDS_SNAPSHOT_DATE is unset - feeds follow their branch heads, so this build is NOT reproducible"
+		printf '\n' >"${ROOT_DIR}/.feeds-cutoff"
 		return 0
 	fi
+
+	# Record the cutoff that was actually used, so BUILD-INFO.txt can carry it.
+	# advance-pin.sh reads it from there and turns it plus the resolved revision
+	# into the pinned pair.  The point of recording rather than recomputing: a
+	# promotion must name the combination THIS run compiled, not one re-derived
+	# later from a date that may by then point at different commits.
+	printf '%s\n' "${cutoff}" >"${ROOT_DIR}/.feeds-cutoff"
 
 	log "Pinning feeds to their state at ${cutoff}"
 
@@ -3755,50 +3763,113 @@ dump_defconfig_diagnostics() {
 		state="$(grep -m1 -E "^#?[[:space:]]?CONFIG_PACKAGE_${pkg}(=| is not set|$)" "$configline" 2>/dev/null || true)"
 		log "  ${pkg}: stanza=${stanza:-0} .config=[${state:-<no line>}]"
 	done
-	# The whole stanza, so the reason a symbol was dropped is readable rather
-	# than inferred: `depends on` on an undefined symbol evaluates to n and takes
-	# the package with it.
+	# The whole stanza, and then the value of every symbol its gates name.
+	#
+	# ★ Two ways this print lied before, both measured on 2026-10-07.  They are
+	#   recorded because each one cost a long dispatch cycle and both produced a
+	#   CONFIDENT WRONG READING rather than an obvious error:
+	#
+	#   1. A `head -12` here.  The stanza is longer than twelve lines, so the
+	#      clauses that mattered were cut off and the conclusion was drawn from an
+	#      incomplete list.  The tell was that the gate values below named
+	#      TARGET_econet_en751221 and USB_GADGET_SUPPORT while the truncated
+	#      stanza named neither -- impossible unless the print was partial.  A
+	#      partial print of a complete input is worse than no print at all.
+	#
+	#   2. A symbol regex of `[A-Za-z_][A-Za-z0-9_]*`, which splits on `-`.
+	#      `PACKAGE_qmodem_INCLUDE_nss-qmi-wwan` came out as
+	#      `PACKAGE_qmodem_INCLUDE_nss` plus `qmi` plus `wwan`, so the loop then
+	#      looked up a symbol that does not exist and reported the equally
+	#      nonexistent value `<unset → n>` for it.  package names contain `-`,
+	#      and so do the symbols built from them; the charset has to allow it.
+	#
+	# The lesson both times: a diagnostic is an input to a decision, so it needs
+	# the same standard of proof as the thing it measures.  Print the WHOLE input,
+	# name the symbol EXACTLY, and put each value next to the clause it belongs
+	# to -- then "which gate is false" is read off, not guessed.
+	#
+	# `|| true` on every stage that is allowed to match nothing: this function
+	# runs under `set -e` and `set -o pipefail`, where a grep that finds no match
+	# is a FAILED COMMAND, and a failed stage aborts the whole build before the
+	# `die` below can print why.  Measured the hard way on 2026-10-07: the first
+	# version of the gate-value loop below killed the run right after its heading,
+	# so the log lost the error message the diagnostics exist to precede.  Note
+	# that `local x="$(...)"` is NOT protected by that: the assignment's status is
+	# the substitution's, so every such line carries its own `|| true`.
+	local stanza clauses clause syms sym line value count
 	for pkg in "${lost[@]}"; do
 		grep -qE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null || continue
-		log "  --- stanza PACKAGE_${pkg}"
-		# `|| true` on every stage that is allowed to match nothing: this
-		# function runs under `set -e` and `set -o pipefail`, where a grep that
-		# finds no match is a FAILED COMMAND, and a failed stage aborts the
-		# whole build before the `die` below can print why.  Measured the hard
-		# way on 2026-10-07: the first version of the gate-value loop below
-		# killed the run right after its heading, so the log lost the error
-		# message the diagnostics exist to precede.
-		{ sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" ||
-			true; } |
-			{ grep -E "depends on|select|default|tristate|bool" || true; } | head -12 ||
-			true
-	done
 
-	# ★ And the VALUE of every symbol those gates name, which is what turns "the
-	# depends are not satisfied" into "THIS clause is not satisfied".
-	#
-	# Measured 2026-10-07: the stanza existed and `.config` held no line for it at
-	# all - kconfig writes nothing for a symbol whose prompt is invisible - so the
-	# package was not "dropped", it was never selectable.  The gates are all of
-	# the form `!(<switch we control>) || <target feature>`, and reading their
-	# values is the difference between guessing which one is n and knowing.
-	#
-	# A symbol with no `CONFIG_...=` line is reported as unset, which in kconfig
-	# means n - that is the normal value of a target feature this board lacks.
-	local syms sym value
-	for pkg in "${lost[@]}"; do
-		grep -qE "^[[:space:]]*(menu)?config PACKAGE_${pkg}$" "$generated" 2>/dev/null || continue
-		syms="$({ sed -n "/^[[:space:]]*\(menu\)\?config PACKAGE_${pkg}$/,/^[[:space:]]*\(menu\)\?config /p" "$generated" ||
-			true; } |
-			{ grep -E "^[[:space:]]*depends on " || true; } |
-			{ grep -oE "[A-Za-z_][A-Za-z0-9_]*" || true; } |
-			{ grep -vE "^(depends|on|if|then|else|menu|config|tristate|bool|default)$" || true; } |
-			{ sort -u || true; })"
-		log "  --- gate values for PACKAGE_${pkg}"
-		for sym in $syms; do
-			value="$({ grep -m1 -E "^CONFIG_${sym}=" "$configline" 2>/dev/null || true; } | cut -d= -f2)"
-			log "    ${sym}=${value:-<unset → n>}"
-		done
+		# awk rather than a sed range: the range form needs a regex, and package
+		# names are full of characters that are metacharacters in one dialect or
+		# another.  String comparison off a whitespace split has no such edge.
+		# Stops at the next `config`, so this is the complete block.
+		stanza="$(awk -v want="PACKAGE_${pkg}" '
+			{
+				t = $0
+				sub(/^[ \t]+/, "", t)
+				split(t, a, /[ \t]+/)
+				if (a[1] == "config" || a[1] == "menuconfig") {
+					if (inside) exit
+					if (a[2] == want) { inside = 1; print $0; next }
+				}
+				if (inside) print $0
+			}
+		' "$generated" 2>/dev/null || true)"
+
+		count="$(printf '%s\n' "$stanza" | grep -c . || true)"
+		log "  --- stanza PACKAGE_${pkg} (${count:-0} non-empty line(s))"
+		# Through `log` and not `printf`: the failure report reads the
+		# build-logs artifact, i.e. build.log, and `log` is what tees into it.
+		# Printed straight to stdout the stanza would be visible in the Actions
+		# page and invisible to the reporter that exists to quote it.
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			log "    ${line}"
+		done <<<"$stanza"
+
+		# Each gate with its own symbols resolved, on the same line.  Kconfig
+		# treats a symbol with no `CONFIG_...=` line as n, so `<unset>` and `n`
+		# mean the same thing to the evaluation; they are printed differently
+		# because "this board lacks the feature" and "explicitly not set" are
+		# different facts about the configuration.
+		clauses="$(printf '%s\n' "$stanza" | { grep -E "^[[:space:]]*depends on " || true; })"
+		if [ -n "$clauses" ]; then
+			log "  --- gates of PACKAGE_${pkg}, with the value of every symbol they name"
+			while IFS= read -r clause; do
+				[ -n "$clause" ] || continue
+				syms="$(printf '%s\n' "$clause" |
+					{ grep -oE "[A-Za-z_][A-Za-z0-9_-]*" || true; } |
+					{ grep -vE "^(depends|on)$" || true; } |
+					{ sort -u || true; })"
+				for sym in $syms; do
+					# Both shapes kconfig writes, and nothing else: a symbol it
+					# decided on gets `CONFIG_X=y|m`, one it considered and
+					# rejected gets `# CONFIG_X is not set`, and one whose prompt
+					# is invisible gets NO LINE AT ALL.  Matching only the first
+					# (the obvious `CONFIG_X=`) made the third collapse into the
+					# second, so "this board has no such feature" and "someone
+					# turned it off" printed identically and the `is not set`
+					# branch was unreachable.  Caught by the local fixture, not by
+					# reading it - and it is the same class of mistake as the
+					# truncated print: a lookup that silently answers the wrong
+					# question.
+					line="$({ grep -m1 -E "^#?[[:space:]]?CONFIG_${sym}(=| is not set)" "$configline" 2>/dev/null || true; })"
+					if [ -z "$line" ]; then
+						value="<no line → n>"
+					elif [ "${line#\#}" != "$line" ]; then
+						value="n (is not set)"
+					else
+						value="${line#*=}"
+					fi
+					log "      ${sym} = ${value}"
+				done
+				log "        ^ from: ${clause#*depends on }"
+			done <<<"$clauses"
+			log "  --- if every clause above reads true, the obstruction is not in"
+			log "      this stanza: check whether the symbol is a choice member or"
+			log "      is being forced off elsewhere in the graph."
+		fi
 	done
 
 	if [ -s "$log" ]; then
@@ -4394,7 +4465,7 @@ collect_artifacts() {
 }
 
 write_build_info() {
-	local dest="$1" rev desc ver code kver abi
+	local dest="$1" rev desc ver code kver abi cuts
 	local profiles="${dest}/profiles.json"
 
 	rev="$(cat "${ROOT_DIR}/.upstream-revision" 2>/dev/null || echo unknown)"
@@ -4440,6 +4511,8 @@ PY
 		code="$OPENWRT_PINNED_SNAPSHOT"
 	fi
 
+	cuts="$(cat "${ROOT_DIR}/.feeds-cutoff" 2>/dev/null || echo '')"
+
 	cat >"${dest}/BUILD-INFO.txt" <<EOF
 project=AutoBuild-H5000M-Openwrt
 upstream_url=${REPO_URL}
@@ -4455,6 +4528,8 @@ target=${TARGET_BOARD}/${TARGET_SUBTARGET}
 profile=${TARGET_PROFILE}
 arch=${TARGET_ARCH}
 built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+feeds_follow_tree=${FEEDS_FOLLOW_TREE}
+feeds_cutoff=${cuts}
 enable_fancontrol=${ENABLE_FANCONTROL}
 enable_netmode=${ENABLE_NETMODE}
 enable_wwand=${ENABLE_WWAND}

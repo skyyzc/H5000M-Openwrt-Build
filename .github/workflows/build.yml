@@ -111,6 +111,13 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: 构建固件
+    # Read by advance-pin.sh: the revision this run compiled, the feed cutoff it
+    # actually used, and which track it was on.  See the `Record what was built`
+    # step for why these travel as job outputs instead of as an artifact.
+    outputs:
+      built_rev: ${{ steps.built.outputs.rev }}
+      built_cutoff: ${{ steps.built.outputs.cutoff }}
+      built_track: ${{ steps.built.outputs.track }}
     permissions:
       contents: write
       # Push the build cache to GitHub Packages (ghcr.io).  Public packages are
@@ -1269,6 +1276,30 @@ jobs:
           echo "=== images ==="
           ls -la artifacts/ 2>/dev/null || true
 
+      # What the promotion job reads, and the reason it is an OUTPUT rather than
+      # a downloaded artifact: BUILD-INFO.txt lives inside a ~250 MB firmware
+      # artifact, and a promotion needs two short strings out of it.  Passing
+      # them through the job boundary keeps the promotion cheap enough that it
+      # can run on every green probe.
+      #
+      # `if: success()` on purpose: after a failed build these are not evidence
+      # of anything, and an empty value here is what makes advance-pin skip.
+      - name: Record what was built, for the promotion job
+        id: built
+        if: success()
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/BUILD-INFO.txt ]; then
+            echo "::warning::no BUILD-INFO.txt - the promotion job will skip"
+            exit 0
+          fi
+          {
+            echo "rev=$(sed -n 's/^openwrt_revision=//p' artifacts/BUILD-INFO.txt | head -n1)"
+            echo "cutoff=$(sed -n 's/^feeds_cutoff=//p' artifacts/BUILD-INFO.txt | head -n1)"
+            echo "track=$(sed -n 's/^upstream_track=//p' artifacts/BUILD-INFO.txt | head -n1)"
+          } >> "$GITHUB_OUTPUT"
+          grep -E '^(rev|cutoff|track)=' "$GITHUB_OUTPUT" | tail -3
+
       # A failed build's evidence is worth keeping.
       #
       # The successful-path upload below is skipped on failure, so without this
@@ -1582,6 +1613,143 @@ jobs:
       tarball_glob: '*-targz-rootfs.tar.gz'
 
   # ---------------------------------------------------------------------------
+  # Layer 7 of the anti-drift design: the pin advances on evidence, or not at all.
+  #
+  # WHY THIS EXISTS
+  #
+  #   `configs/upstream.env` holds OPENWRT_PINNED_REVISION + FEEDS_SNAPSHOT_DATE,
+  #   and that pair is the recovery mechanism: `dispatch-build.sh -f pinned=true`
+  #   compiles it, and it is what produced the last firmware that worked.  Until
+  #   this job existed the pair was moved by hand, which failed in both
+  #   directions:
+  #
+  #     * a probe that came out green proved nothing that STUCK.  The pin stayed
+  #       put, so the next probe began from the same old pair and the project
+  #       never moved forward on its own - "follow upstream" was really "follow
+  #       upstream once, manually, whenever someone remembered";
+  #     * and nothing prevented the pin being moved to a revision that had never
+  #       been compiled, which is exactly the class of change (2026-10-05's group
+  #       id collision, 2026-10-07's lost Kconfig symbol) that cost two days.
+  #
+  #   So this job enforces one narrow, checkable invariant: the pin may only ever
+  #   name a revision whose OWN build produced a complete image and passed every
+  #   gate.  Its only input is the record of a run that succeeded, so a revision
+  #   nothing has built cannot be promoted even by accident.  advance-pin.sh
+  #   refuses anything else - a pinned run (no evidence to promote), a run whose
+  #   feeds were never rolled back (not a reproducible state), a malformed
+  #   revision or date, and the ordinary "already current".
+  #
+  # WHY IT CANNOT RUN IN THE WRONG PLACE
+  #
+  #   `needs.build.outputs.built_rev != ''` skips it when the build produced no
+  #   BUILD-INFO at all.  A `pull_request` must never write to the branch.
+  #   `inputs.pinned` means the run already compiled the pin, so promoting it
+  #   would be circular.  `ref_type == 'branch'` matters because a tag push is
+  #   also a way to start this workflow, and there `github.ref_name` is the TAG:
+  #   the checkout would land on a detached tag and the push on the next line
+  #   would address `HEAD:<tag>`, which is nowhere a pin belongs.  And after a
+  #   FAILED probe this job does not run at all - which is the whole point: the
+  #   pin stays where it is, because that is the firmware the user still has.
+  #
+  # A FAILED PROMOTION IS A FAILURE
+  #
+  #   No `continue-on-error`.  If the branch cannot be pushed - protection rules,
+  #   a race with a hand push - the pin silently stops advancing, and a silently
+  #   frozen pin is the same disease as the silently frozen feed library this
+  #   project already had.  report-failure lists the job results, so the alert
+  #   names this job rather than pointing at a build that in fact succeeded.
+  # ---------------------------------------------------------------------------
+  advance-pin:
+    name: 推进钉版（仅在探测通过时）
+    needs: [build]
+    if: >-
+      ${{
+        success() && !cancelled() &&
+        github.ref_type == 'branch' &&
+        needs.build.outputs.built_rev != '' &&
+        github.event_name != 'pull_request' &&
+        !(github.event_name == 'workflow_dispatch' && inputs.pinned)
+      }}
+    runs-on: ubuntu-24.04
+    permissions:
+      # Push the advanced pin.  Scoped to this job, and this job only.
+      contents: write
+    env:
+      REPO: ${{ github.repository }}
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # persist-credentials stays false even though this job pushes.  A
+          # checkout that leaves the token in .git/config hands it to everything
+          # that later runs in the workspace; the push below authenticates with
+          # an explicit URL instead, which is the documented way to need write
+          # access without storing it (zizmor: artipacked).
+          persist-credentials: false
+          # No explicit `ref:`.  The default already checks out the ref that
+          # started the run, and it has to be THAT ref anyway: the job's whole
+          # purpose is to commit on top of what was just built.  Naming the ref
+          # explicitly would add a second place to keep in step, and a branch
+          # name interpolated into `with:` is one more value crossing a
+          # trust boundary for no gain.
+
+      - name: Advance the pinned pair, on evidence
+        # Through `env`, not interpolated into `run:` -- the same rule the
+        # Resolve step states at length.  A job output is data, and a value that
+        # reaches the shell as source text is a value that can be code.  (It is
+        # also the difference between a green run and a template-injection
+        # finding: these values come from our own BUILD-INFO.txt, but the audit
+        # cannot know that, and the safe spelling costs nothing.)
+        env:
+          BUILT_REV: ${{ needs.build.outputs.built_rev }}
+          BUILT_CUTOFF: ${{ needs.build.outputs.built_cutoff }}
+          BUILT_TRACK: ${{ needs.build.outputs.built_track }}
+        run: |
+          set -euo pipefail
+          ./scripts/advance-pin.sh \
+            --revision "$BUILT_REV" \
+            --cutoff "$BUILT_CUTOFF" \
+            --track "$BUILT_TRACK"
+
+      - name: Commit and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git add configs/upstream.env
+          if git diff --cached --quiet; then
+            echo "the pin did not change - nothing to commit"
+            exit 0
+          fi
+
+          # The message is built from several -m arguments rather than a heredoc,
+          # and that is not a style choice.  A heredoc body has to start at
+          # column 1 to avoid indenting every line of the message, but a `run: |`
+          # block scalar ENDS when its indentation ends - so the body would tear
+          # the YAML apart.  The repo's own contract check caught exactly that
+          # here ("could not find expected ':'" at the first body line).  Several
+          # -m arguments become separate paragraphs and keep the file valid.
+          #
+          # The token is masked by GitHub in the log, and it travels in an
+          # argument rather than in .git/config, so no later process in this
+          # workspace can read it off disk.  Same reason as the checkout note.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit \
+            -m 'chore(pin): advance the pinned upstream pair to a revision that just built green' \
+            -m 'Written by the advance-pin job, which is its only writer. The pair moves only when an unpinned probe run produced a complete image and passed every gate, so the pin always names a combination that has itself been built. Moving it to a revision nothing has compiled is what this job exists to make impossible.' \
+            -m "The evidence is the BUILD-INFO.txt of the run quoted below. See the job comment in .github/workflows/build.yml for the full reasoning." \
+            -m "Run: ${RUN_URL}"
+
+          git push "$remote" "HEAD:${BRANCH}"
+          echo "pushed the advanced pin to ${BRANCH}"
+          git log -1 --stat
+
+  # ---------------------------------------------------------------------------
   # Layer 6 of the anti-drift design: a failed run has to say so.
   #
   # WHY THIS EXISTS
@@ -1607,9 +1775,17 @@ jobs:
   # ---------------------------------------------------------------------------
   report-failure:
     name: 构建失败告警
-    needs: [build, publish-apk-repo, script-test]
+    # advance-pin is in the list on purpose.  A promotion that could not push
+    # leaves the pin silently frozen, and a frozen pin is the same disease as the
+    # frozen feed library this project already had: everything still says green
+    # while the project stops moving.  A failure there is a failure here.
+    needs: [build, publish-apk-repo, script-test, advance-pin]
     # Real failures only.  A run cancelled by hand — a superseded dispatch, a
     # concurrency cancellation — is not drift and must not open an issue.
+    #
+    # `!cancelled()` and not `!github.event...`: a run where one job failed and a
+    # later one was skipped still counts, and a run whose only problem was a
+    # cancelled peer must not.
     if: ${{ failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     continue-on-error: true
@@ -1631,6 +1807,11 @@ jobs:
       REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       ISSUE_TITLE: '[自动构建失败] H5000M 主线 OpenWrt'
+      # Which job broke.  Without this the report only knows that SOMETHING
+      # failed, and a promotion that could not push reads as a build failure -
+      # sending the reader to build.log, which is fine and empty of answers.
+      # toJSON(needs) is the only way to see a neighbour's result from here.
+      NEEDS_RESULTS: ${{ toJSON(needs) }}
     steps:
       # The build job uploads `build-logs` precisely when it fails, so this is
       # the highest-signal source.  Downloading it is best-effort on purpose:
@@ -1656,6 +1837,16 @@ jobs:
             echo "- 提交: ${GITHUB_SHA}"
             echo "- 分支: ${GITHUB_REF_NAME}"
             echo "- 时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo
+
+            # Name the job.  "something failed" is not actionable; "advance-pin
+            # failed while build succeeded" is, and it points somewhere else
+            # entirely (branch protection, a racing hand push).
+            echo "各作业结果："
+            echo
+            printf '%s' "${NEEDS_RESULTS:-{}}" |
+              jq -r 'to_entries[] | "  - \(.key): \(.value.result)"' 2>/dev/null ||
+              echo "  - (could not read the job results)"
             echo
           } > "$report"
 
@@ -1709,8 +1900,11 @@ jobs:
             echo 'scripts/dispatch-build.sh -f pinned=true'
             echo '```'
             echo
-            echo '它用 `configs/upstream.env` 里的 `OPENWRT_PINNED_REVISION` + `FEEDS_SNAPSHOT_DATE`（成对，必须同时生效）。'
+            echo '它用 `configs/upstream.env` 里的 `OPENWRT_PINNED_REVISION` + `FEEDS_SNAPSHOT_DATE`（成对，必须同时生效），'
+            echo '也就是**上一次探测通过、并且真的出过固件**的那个组合 —— 它由 advance-pin 作业自动前移，只在绿色时写入。'
             echo '注意：这只是止血。钉版会同时冻住上游的安全更新，根因仍需修掉后再回到 `pinned=false`。'
+            echo
+            echo '如果 pin 刚被自动推进过，本地的 dispatch-build.sh 会先 `git fetch` 再快进到远端，不需要手工 pull。'
             echo
           } >> "$report"
 
