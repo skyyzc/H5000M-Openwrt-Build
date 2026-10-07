@@ -20,11 +20,20 @@ on:
         required: true
         default: '36568281572'
 
+# Least privilege at the WORKFLOW level, then widen on the job.  The earlier
+# form put `pages: write` and `id-token: write` up here, and zizmor's
+# `excessive-permissions` check rejected both:
+#
+#   error[excessive-permissions]: overly broad permissions
+#     --> .github/workflows/publish-apk-repo.yml:26:3
+#     pages: write is overly broad at the workflow level
+#
+# A top-level grant reaches every job and every action inside it; only the one
+# job that actually deploys needs a write scope.  This file was written in a
+# hurry as a recovery path and had never run on this branch, so the weekly
+# scan found the sloppiness before a human did.
 permissions:
   contents: read
-  actions: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -34,12 +43,23 @@ jobs:
   publish:
     name: 发布 apk 仓库
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read      # actions/download-artifact reads another run's artifact
+      pages: write       # deploy the site
+      id-token: write    # OIDC identity for the Pages deployment
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Pinned to commit hashes, matching the publish job in build.yml.  The
+      # `@v4`-style tags these used are mutable — whoever controls the action
+      # repository can repoint one at a different commit — and this workflow
+      # runs with `pages: write` and `id-token: write`.  Using the same hashes
+      # build.yml already trusts also means the two publish paths cannot drift
+      # apart.
       - name: 下载 apk-repo 工件（跨 run）
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: apk-repo
           path: apk-repo
@@ -47,13 +67,18 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: 配置 Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+        with:
+          # Turn Pages on if it is off, the same as build.yml's publish job.
+          # Without it the step dies with "Get Pages site failed" and the
+          # recovery path fails on exactly the situation it exists for.
+          enablement: true
 
       - name: 打包 Pages 工件
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: apk-repo
 
       - name: 部署到 Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

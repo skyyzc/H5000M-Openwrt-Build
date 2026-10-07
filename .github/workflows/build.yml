@@ -47,10 +47,20 @@ on:
         description: 'HigoOS 海狗面板保留（higoros-overlay：厂商后端+前端+风扇控制器）—— 启用后 FAN789 风扇/网络插件自动关闭'
         type: boolean
         default: true
-      enable_mt5700m:
-        description: '5G 拨号器 luci-app-mt5700m 启用后 wwand 会被自动关闭'
-        type: boolean
-        default: false
+      # Two switches used to live here and now do not: `enable_mt5700m` and
+      # `enable_ebpf_proxy_kernel`.  GitHub caps `workflow_dispatch` at TEN
+      # inputs and this file carried TWELVE, which actionlint rejects outright
+      # (build.yml:8:3: maximum number of inputs ... is 10 but 12 are provided)
+      # and which made the whole dispatch surface an untested code path - the
+      # gate went red every Monday and nobody saw it.
+      #
+      # Both moved to repository variables.  That is the same route
+      # FEEDS_FOLLOW_TREE takes and for the same reason: the ceiling is on the
+      # input LIST, not on the switches, so a switch that is read once a year
+      # does not deserve one of ten slots.  Their defaults are unchanged -
+      # MT5700M false, eBPF true - so a scheduled build compiles exactly what
+      # it compiled before.  Flip either from the repo settings via
+      # `vars.ENABLE_MT5700M` / `vars.ENABLE_EBPF_PROXY_KERNEL`.
       enable_adblock:
         description: 'Adblock 广告过滤'
         type: boolean
@@ -63,10 +73,6 @@ on:
         description: 'Nikki-RS 代理（clash-rs 内核，支持 eBPF 加速）'
         type: boolean
         default: false
-      enable_ebpf_proxy_kernel:
-        description: 'eBPF 代理内核支持（Nikki-RS 的 cgroup BPF，会改变内核 ABI）'
-        type: boolean
-        default: true
 
   push:
     tags:
@@ -429,7 +435,10 @@ jobs:
           ENABLE_QMODEM: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_qmodem) || 'true' }}
           ENABLE_OAF: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_oaf) || 'true' }}
           ENABLE_HIGOROS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_higoros) || 'true' }}
-          ENABLE_MT5700M: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_mt5700m) || 'false' }}
+          # Moved off the input list (see the note in `workflow_dispatch` above):
+          # the ten-slot ceiling left no room, and a repository variable is the
+          # same switch with the same default.
+          ENABLE_MT5700M: ${{ vars.ENABLE_MT5700M || 'false' }}
           ENABLE_UPNP: 'true'
           ENABLE_THEME_ARGON: 'true'
           ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'false' }}
@@ -437,10 +446,10 @@ jobs:
           H5000M_APK_REPO_URL: ${{ vars.H5000M_APK_REPO_URL || '' }}
           ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
           ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
-          # True on scheduled/tag builds: the eBPF kernel options are what make
-          # the Nikki-RS eBPF page more than a switch that cannot work.  Only a
-          # manual run can turn them off, for a deliberately minimal image.
-          ENABLE_EBPF_PROXY_KERNEL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_ebpf_proxy_kernel) || 'true' }}
+          # True by default, as it was when it was an input.  Moved to a
+          # repository variable along with MT5700M - see the note in
+          # `workflow_dispatch` above for why.
+          ENABLE_EBPF_PROXY_KERNEL: ${{ vars.ENABLE_EBPF_PROXY_KERNEL || 'true' }}
           ENABLE_OPENCLASH: ${{ vars.ENABLE_OPENCLASH || 'false' }}
           ENABLE_MOSDNS: 'true'
           ENABLE_HOMEPROXY: 'false'
@@ -831,7 +840,7 @@ jobs:
           # The same expression the Build step uses, so a run that turned the
           # eBPF kernel options off is not failed by a check that insists they
           # are on.  Nothing else here differs by switch.
-          ENABLE_EBPF_PROXY_KERNEL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_ebpf_proxy_kernel) || 'true' }}
+          ENABLE_EBPF_PROXY_KERNEL: ${{ vars.ENABLE_EBPF_PROXY_KERNEL || 'true' }}
         run: |
           set -uo pipefail
           cd "$BUILD_DIR"

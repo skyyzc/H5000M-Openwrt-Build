@@ -1,0 +1,115 @@
+name: 签发构建证明与 SBOM
+
+# SBOM + build provenance for the shipped apk repository index.
+#
+# WHY THIS IS ITS OWN WORKFLOW, AND NOT A JOB IN security.yml
+# ----------------------------------------------------------
+# It used to be a job there, and that arrangement was broken in a way nothing
+# reported: ossf/scorecard-action refuses to publish results from a workflow
+# that contains ANY OTHER job holding `id-token:`.  From run 37309310016:
+#
+#   error sending scorecard results to webapp: http response 400,
+#   {"code":400,"message":"workflow verification failed: workflow has a
+#    non-scorecard job with id-token permissions, see
+#    https://github.com/ossf/scorecard-action#workflow-restrictions"}
+#
+# Scorecard only downgrades that to a warning, so the job still went green -
+# this repository's public scorecard score has been silently not updating the
+# whole time.  Both jobs legitimately need OIDC (Scorecard to sign its
+# submission, this one to sign attestations), so the fix is not to remove a
+# permission but to stop sharing a workflow: here, `id-token: write` is the
+# only one in the file.
+#
+# The move also fixes the timing.  As a job in security.yml this ran on that
+# workflow's own schedule - Mondays 05:30 UTC - which is *before* the firmware
+# build (04:00 UTC nominal, hours later in queue) has published anything, so
+# it attested the previous week's index.  Triggering off the build's
+# completion attests what the build actually published.
+
+on:
+  # After the firmware build, so the attested index is the one that run just
+  # deployed.  The name must match build.yml's `name:` exactly.
+  workflow_run:
+    workflows: ["构建 H5000M 主线 OpenWrt 固件"]
+    types: [completed]
+  workflow_dispatch:
+
+# No permissions by default; the single job below widens them.
+permissions: {}
+
+jobs:
+  attest:
+    name: 签发构建证明与 SBOM
+    # A failed build publishes nothing, so there is nothing to attest.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write        # OIDC: the signing identity, no long-lived secret
+      attestations: write    # store the attestation
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download the published apk repository
+        run: |
+          set -euo pipefail
+          # The index is small; fetch it plus the packages that make up the
+          # repository listing.  Attesting the INDEX is the point: it is the
+          # signed artefact every device trusts.
+          mkdir -p apk-repo
+          base="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          curl -fsSL --retry 3 -o apk-repo/packages.adb "${base}/packages.adb"
+
+      - name: Generate an SBOM for the repository index
+        run: |
+          set -euo pipefail
+          # SPDX is the format `actions/attest` expects for `sbom-path`.
+          # Installed from a
+          # pinned release with a verified SHA256 rather than the upstream
+          # `install.sh` on `main` — that script was a Pinned-Dependencies
+          # finding for the same reason as actionlint's.
+          version=1.52.0
+          sha256=caeedb81fb0491615f1ebd1761e4145d41ee86dd2cc7bf80669f9f5ad9d6133d
+          curl -fsSL --retry 3 -o /tmp/syft.tar.gz \
+            "https://github.com/anchore/syft/releases/download/v${version}/syft_${version}_linux_amd64.tar.gz"
+          echo "${sha256}  /tmp/syft.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/syft.tar.gz -C /usr/local/bin syft
+          syft scan dir:apk-repo -o spdx-json=sbom.spdx.json
+          syft --version
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: apk-repo/packages.adb
+
+      - name: Attest the SBOM
+        # `actions/attest-sbom` is deprecated: it is now a thin wrapper whose
+        # only remaining job is to print
+        #   "actions/attest-sbom has been deprecated, please use actions/attest
+        #    instead"
+        # as a warning annotation before forwarding to `actions/attest`.
+        # Verified against the pinned v4.1.0 manifest, so that echo fires on
+        # every run.  Calling `actions/attest` directly removes the wrapper and
+        # the warning while keeping the `sbom-path` input, which it declares
+        # itself (its description confirms it creates an SBOM attestation).
+        #
+        # Pinned at v4.2.2, the newest patch (only dependency bumps over
+        # v4.2.1).  The neighbouring attest-build-provenance step is itself a
+        # wrapper around the SAME action — v4.2.2 wraps attest v4.2.1 — so the
+        # two steps now attest through one implementation instead of two.
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: apk-repo/packages.adb
+          sbom-path: sbom.spdx.json
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sbom
+          path: sbom.spdx.json
+          retention-days: 90
