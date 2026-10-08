@@ -135,7 +135,7 @@ jobs:
     #
     # A self-hosted runner must carry the labels linux, x64 and h5000m.
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && fromJSON('["self-hosted","linux","x64","h5000m"]') || 'ubuntu-24.04' }}
-    timeout-minutes: 350
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -267,17 +267,6 @@ jobs:
             h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-
             h5000m-toolchain-
 
-      - name: Save toolchain
-        # Only from a trusted ref: `refs/heads/master` or a release tag.  A pull
-        # request — including one from a fork — must not be able to seed a cache
-        # that a later trusted build will unpack.
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .toolchain-cache
-          key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
-
       - name: Restore download cache
         id: dl-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -290,15 +279,6 @@ jobs:
           # towards its 10 GB cache ceiling.
           key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
           restore-keys: h5000m-dl-
-
-      - name: Save download cache
-        # Same cache-poisoning rule as the toolchain above: trusted refs only.
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: openwrt/dl
-          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
 
       # The build tree is the expensive part: 40 GB of per-package build
       # directories and their .built stamps.  actions/cache cannot hold it —
@@ -386,16 +366,6 @@ jobs:
             openwrt/.ccache
           key: h5000m-ccache-${{ github.run_id }}
           restore-keys: h5000m-ccache-
-
-      - name: Save ccache
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.ccache
-            openwrt/.ccache
-          key: h5000m-ccache-${{ github.run_id }}
 
       # The same signing key for every build.  secrets cannot be used in an
       # `if:`, so the step always runs and decides from the environment.
@@ -526,116 +496,6 @@ jobs:
           echo "apk repository URL for the firmware: ${H5000M_APK_REPO_URL}"
 
           ./scripts/local-build.sh "${args[@]}"
-
-      # Both halves are required, and this is the part that is easy to get
-      # wrong: OpenWrt's completion markers (.built, .prepared) live in
-      # build_dir/toolchain-*/, NOT in staging_dir/.  Caching only the installed
-      # toolchain would restore the binaries and still rebuild the whole thing,
-      # because make looks at the stamps.
-      #
-      #   build_dir/toolchain-*      ~4.0 GB, the stamps and build trees
-      #   staging_dir/host           ~0.3 GB, host tools and their .prepared
-      #   staging_dir/toolchain-*    ~0.4 GB, the installed cross toolchain
-      #
-      # zstd -1 because this runs on every build and the cache action compresses
-      # again anyway; the goal is a fast archive, not a small one.
-      - name: Pack the toolchain for the cache
-        if: success()
-        run: |
-          set -euo pipefail
-          mkdir -p .toolchain-cache
-          # The globs must expand INSIDE openwrt/.  Expanding them from the
-          # repository root matches nothing, and with nullglob set the patterns
-          # then vanish silently — an earlier version of this step cached only
-          # staging_dir/host, the one literal path in the list, and reported
-          # success while caching almost nothing.
-          (
-            cd openwrt
-            shopt -s nullglob
-            # build_dir/host carries the host tools' .built stamps.  Without it
-            # every run recompiles all ~55 host tools even though
-            # staging_dir/host was restored — measured at 18 minutes, 10 of them
-            # in cmake alone.  rust is excluded: its HOST_BUILD_DIR is
-            # build_dir/host/rustc-<ver>-src, and a host build tree captured at
-            # a different moment is the documented reason a restored cache once
-            # broke `package/feeds/packages/rust [host]` 72 seconds into a
-            # build.  The host tools themselves are cheap and safe to reuse.
-            dirs=(build_dir/toolchain-* build_dir/host staging_dir/host staging_dir/toolchain-*)
-            [ "${#dirs[@]}" -gt 0 ] || { echo "::warning::no toolchain to cache"; exit 0; }
-            echo "caching: ${dirs[*]}"
-            tar -I 'zstd -1' --exclude='build_dir/host/rustc*' \
-              -cf ../.toolchain-cache/toolchain.tar.zst "${dirs[@]}"
-          )
-          echo "packed $(du -h .toolchain-cache/toolchain.tar.zst | cut -f1)"
-
-      # Pack and push the build tree.  Split into two blobs so a failure to
-      # upload one does not lose the other, and so the layers can be reused
-      # independently by the registry.
-      - name: Save build cache to GitHub Packages
-        if: success()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_ACTOR: ${{ github.actor }}
-          # Step outputs are attacker-influenced in principle (they derive from
-          # the repository name and a hash), so they cross into the shell as
-          # DATA via the environment, never as interpolated source text.  This
-          # was the last `info`-level template-injection finding zizmor
-          # reported; the workflow is now clean at every severity.
-          CACHE_IMAGE: ${{ steps.buildcache.outputs.image }}
-          CACHE_TAG: ${{ steps.buildcache.outputs.tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p .buildcache
-          (
-            cd openwrt
-            shopt -s nullglob
-            # NOT build_dir/host: rust's HOST_BUILD_DIR is
-            # build_dir/host/rustc-<ver>-src, and restoring a host build tree
-            # that was captured at a different moment is the most likely reason
-            # `package/feeds/packages/rust [host]` began failing 72 seconds into
-            # the build — far too fast for LLVM to have been compiling.  The
-            # host tools are cheap next to that risk.
-            dirs=(build_dir/target-* build_dir/hostpkg
-                  staging_dir/target-* staging_dir/hostpkg)
-            keep=()
-            for d in "${dirs[@]}"; do [ -e "$d" ] && keep+=("$d"); done
-            [ "${#keep[@]}" -gt 0 ] || { echo "::warning::nothing to cache"; exit 0; }
-            echo "packing: ${keep[*]}"
-            tar -I 'zstd -1' -cf ../.buildcache/build-cache.tar.zst "${keep[@]}"
-          )
-          size="$(du -h .buildcache/build-cache.tar.zst | cut -f1)"
-          echo "packed ${size}"
-          printf '%s' "${GH_TOKEN}" | oras login ghcr.io -u "${GH_ACTOR}" --password-stdin
-          # Push from INSIDE .buildcache.  oras takes the blob's title from the
-          # path it is given, so `oras push image .buildcache/x.tar.zst` stores
-          # the title as ".buildcache/x.tar.zst" — and `oras pull -o .buildcache`
-          # then writes it to .buildcache/.buildcache/x.tar.zst, where the build
-          # does not look.  That is exactly what happened: 15 GB was pulled on
-          # every run and never used, and the log said
-          #   restored 15G from ...buildcache:cfde3dbe...
-          #   No cached build state at .../.buildcache/build-cache.tar.zst
-          # A bare file name makes the title a bare file name.
-          # A sidecar checksum, pushed alongside.  Without it a truncated
-          # transfer is only discovered after six minutes of tar failing with
-          # "premature end", and the run silently rebuilds everything: 15 GB
-          # moved for nothing and no indication of why.
-          ( cd .buildcache && sha256sum build-cache.tar.zst > build-cache.sha256 )
-          ( cd .buildcache && oras push "${CACHE_IMAGE}:${CACHE_TAG}" build-cache.tar.zst build-cache.sha256 )
-          # Record the exact size and digest being stored.  A build cache that
-          # comes back "truncated" every single time is otherwise impossible to
-          # localise: these two lines say what was pushed, and the restore step
-          # says what came back, so the next run can tell a bad push from a bad
-          # pull instead of guessing.
-          echo "pushed $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes, sha256 $(cut -d' ' -f1 .buildcache/build-cache.sha256) as ${CACHE_IMAGE}:${CACHE_TAG} (${size})"
-          # Confirm the push actually landed.  This step is continue-on-error, so
-          # a half-finished upload is otherwise invisible — and it is not free:
-          # the next run transfers the whole archive before rejecting it.
-          if oras manifest fetch "${CACHE_IMAGE}:${CACHE_TAG}" >/dev/null 2>&1; then
-            echo "the pushed cache manifest is readable"
-          else
-            echo "::warning::the build cache push could not be verified; the next run will rebuild from scratch"
-          fi
 
       # This is the step that has to work, because everything else about a
       # failure is guesswork without it.
@@ -1435,6 +1295,173 @@ jobs:
             gh release create "${rel_name}" "${files[@]}" \
               --title "H5000M mainline OpenWrt ${rel_name}" \
               --notes "${notes}"
+          fi
+
+      # ================================================================ 缓存维护
+      #
+      # Everything below is LAST on purpose, and it is the only reason the order
+      # of this job looks odd.  Packing the toolchain (a ~4.5 GB tar) and pushing
+      # the build tree (tens of GB to ghcr.io) together cost 20-35 minutes.
+      # While they sat before the release they ate the job's remaining budget,
+      # so the firmware was never published: run 37721843931 compiled for 5h45m,
+      # reached "Pack the toolchain for the cache", hit `timeout-minutes` and was
+      # cancelled — release, artifacts and attestation all skipped.  Published
+      # firmware is the product; a warm cache is an optimisation.  The
+      # optimisation goes last, where losing its race costs nothing that matters.
+      #
+      # The toolchain and download caches are saved here rather than beside their
+      # restore steps above, for two measured reasons:
+      #
+      #   * Position.  `Save toolchain` used to run BEFORE `Pack the toolchain`
+      #     wrote .toolchain-cache/toolchain.tar.zst, so it archived a directory
+      #     that did not exist yet.
+      #   * Condition.  All three saves were guarded on
+      #     `github.ref == 'refs/heads/master'`.  This repository's branch is
+      #     `higoros-qmodem`, so none of them ever ran.  Every run logged
+      #     "Cache not found" for the toolchain, the download cache and ccache,
+      #     and rebuilt the toolchain from source — which is why a full build
+      #     costs about six hours and why that number never improves.
+      #
+      # The guard now asks for the repository's OWN default branch instead of a
+      # name that happens to be right for a different fork, so the
+      # cache-poisoning rule (restore anywhere, save only from a trusted ref) is
+      # kept while actually working here.
+      #
+      # Both halves are required, and this is the part that is easy to get
+      # wrong: OpenWrt's completion markers (.built, .prepared) live in
+      # build_dir/toolchain-*/, NOT in staging_dir/.  Caching only the installed
+      # toolchain would restore the binaries and still rebuild the whole thing,
+      # because make looks at the stamps.
+      #
+      #   build_dir/toolchain-*      ~4.0 GB, the stamps and build trees
+      #   staging_dir/host           ~0.3 GB, host tools and their .prepared
+      #   staging_dir/toolchain-*    ~0.4 GB, the installed cross toolchain
+      #
+      # zstd -1 because this runs on every build and the cache action compresses
+      # again anyway; the goal is a fast archive, not a small one.
+      #
+      # The globs must expand INSIDE openwrt/.  Expanding them from the
+      # repository root matches nothing, and with nullglob set the patterns then
+      # vanish silently — an earlier version of this step cached only
+      # staging_dir/host, the one literal path in the list, and reported success
+      # while caching almost nothing.  build_dir/host carries the host tools'
+      # .built stamps and is included for that reason; rust is excluded because
+      # its HOST_BUILD_DIR is build_dir/host/rustc-<ver>-src, and a host build
+      # tree captured at a different moment is the documented reason a restored
+      # cache once broke `package/feeds/packages/rust [host]` 72 seconds into a
+      # build.
+      - name: Pack the toolchain for the cache
+        if: success()
+        run: |
+          set -euo pipefail
+          mkdir -p .toolchain-cache
+          (
+            cd openwrt
+            shopt -s nullglob
+            dirs=(build_dir/toolchain-* build_dir/host staging_dir/host staging_dir/toolchain-*)
+            [ "${#dirs[@]}" -gt 0 ] || { echo "::warning::no toolchain to cache"; exit 0; }
+            echo "caching: ${dirs[*]}"
+            tar -I 'zstd -1' --exclude='build_dir/host/rustc*' \
+              -cf ../.toolchain-cache/toolchain.tar.zst "${dirs[@]}"
+          )
+          echo "packed $(du -h .toolchain-cache/toolchain.tar.zst | cut -f1)"
+
+      # Only from a trusted ref: this repository's default branch, or a release
+      # tag.  A pull request — including one from a fork — must not be able to
+      # seed a cache that a later trusted build will unpack.
+      - name: Save toolchain
+        if: github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .toolchain-cache
+          key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
+
+      - name: Save download cache
+        if: github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: openwrt/dl
+          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
+
+      - name: Save ccache
+        if: github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.ccache
+            openwrt/.ccache
+          key: h5000m-ccache-${{ github.run_id }}
+
+      # Pack and push the build tree.  Split into two blobs so a failure to
+      # upload one does not lose the other, and so the layers can be reused
+      # independently by the registry.
+      - name: Save build cache to GitHub Packages
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+          # Step outputs are attacker-influenced in principle (they derive from
+          # the repository name and a hash), so they cross into the shell as
+          # DATA via the environment, never as interpolated source text.  This
+          # was the last `info`-level template-injection finding zizmor
+          # reported; the workflow is now clean at every severity.
+          CACHE_IMAGE: ${{ steps.buildcache.outputs.image }}
+          CACHE_TAG: ${{ steps.buildcache.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p .buildcache
+          (
+            cd openwrt
+            shopt -s nullglob
+            # NOT build_dir/host: rust's HOST_BUILD_DIR is
+            # build_dir/host/rustc-<ver>-src, and restoring a host build tree
+            # that was captured at a different moment is the most likely reason
+            # `package/feeds/packages/rust [host]` began failing 72 seconds into
+            # the build — far too fast for LLVM to have been compiling.  The
+            # host tools are cheap next to that risk.
+            dirs=(build_dir/target-* build_dir/hostpkg
+                  staging_dir/target-* staging_dir/hostpkg)
+            keep=()
+            for d in "${dirs[@]}"; do [ -e "$d" ] && keep+=("$d"); done
+            [ "${#keep[@]}" -gt 0 ] || { echo "::warning::nothing to cache"; exit 0; }
+            echo "packing: ${keep[*]}"
+            tar -I 'zstd -1' -cf ../.buildcache/build-cache.tar.zst "${keep[@]}"
+          )
+          size="$(du -h .buildcache/build-cache.tar.zst | cut -f1)"
+          echo "packed ${size}"
+          printf '%s' "${GH_TOKEN}" | oras login ghcr.io -u "${GH_ACTOR}" --password-stdin
+          # Push from INSIDE .buildcache.  oras takes the blob's title from the
+          # path it is given, so `oras push image .buildcache/x.tar.zst` stores
+          # the title as ".buildcache/x.tar.zst" — and `oras pull -o .buildcache`
+          # then writes it to .buildcache/.buildcache/x.tar.zst, where the build
+          # does not look.  That is exactly what happened: 15 GB was pulled on
+          # every run and never used, and the log said
+          #   restored 15G from ...buildcache:cfde3dbe...
+          #   No cached build state at .../.buildcache/build-cache.tar.zst
+          # A bare file name makes the title a bare file name.
+          # A sidecar checksum, pushed alongside.  Without it a truncated
+          # transfer is only discovered after six minutes of tar failing with
+          # "premature end", and the run silently rebuilds everything: 15 GB
+          # moved for nothing and no indication of why.
+          ( cd .buildcache && sha256sum build-cache.tar.zst > build-cache.sha256 )
+          ( cd .buildcache && oras push "${CACHE_IMAGE}:${CACHE_TAG}" build-cache.tar.zst build-cache.sha256 )
+          # Record the exact size and digest being stored.  A build cache that
+          # comes back "truncated" every single time is otherwise impossible to
+          # localise: these two lines say what was pushed, and the restore step
+          # says what came back, so the next run can tell a bad push from a bad
+          # pull instead of guessing.
+          echo "pushed $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes, sha256 $(cut -d' ' -f1 .buildcache/build-cache.sha256) as ${CACHE_IMAGE}:${CACHE_TAG} (${size})"
+          # Confirm the push actually landed.  This step is continue-on-error, so
+          # a half-finished upload is otherwise invisible — and it is not free:
+          # the next run transfers the whole archive before rejecting it.
+          if oras manifest fetch "${CACHE_IMAGE}:${CACHE_TAG}" >/dev/null 2>&1; then
+            echo "the pushed cache manifest is readable"
+          else
+            echo "::warning::the build cache push could not be verified; the next run will rebuild from scratch"
           fi
 
   # Publishes artifacts/apk-repo/ to GitHub Pages, which is what makes the
