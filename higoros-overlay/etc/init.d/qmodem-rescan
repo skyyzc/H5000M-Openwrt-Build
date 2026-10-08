@@ -19,22 +19,41 @@
 #
 # 后果：模组永久停留在「未识别」—— ubus call qmodem info
 # '{"config_section":"2_1"}' 返回空数组，海狗 CPE 页显示「模组未识别」；
-# 但底层数据面（wwan0 + udhcpc + 默认路由）其实是通的，极易误判为 5G 故障。
+# 但底层数据面（wwan0_1 + udhcpc + 默认路由）其实是通的，极易误判为 5G 故障。
 #
 # 本服务只做调用方补偿：开机后在若干时间点调用 QModem 官方扫描入口
-# /usr/share/qmodem/modem_scan.sh scan usb，识别成功即退出。
+# /usr/share/qmodem/modem_scan.sh scan usb；全部失败则重启 QModem 的扫描
+# daemon（/etc/init.d/qmodem_init）再试一次。
 # 不修改 QModem 任何文件、不改动其 uci 配置。删除本文件与 S92 软链即可回退。
+#
+# ★ 2026-10-08 内存启动实机：为什么必须是「重启 daemon」而不是继续补扫
+#   首个 daemon 实例在启动窗口内判定失败后，45s/80s/120s 三个时间点的补扫
+#   加手动 qmodem-rescan --now 共 4 次全部复现 "modem profile not matched"；
+#   而 /etc/init.d/qmodem_init restart 换出新 daemon 后，第一次 scan 即
+#   "added modem section=2_1 name=rg520n-cn type=usb ports=2 valid=2" 并开始拨号。
+#   反证：健康 daemon 可被反复重新识别（删掉 uci section 后 scan 立刻重建），
+#   说明坏的是那一个 daemon 实例的状态，不是扫描机制。
+#
+# ★ 为什么不用 procd 管这个服务
+#   本脚本只跑一轮阶梯（最长约 8 分钟）后自然退出。原写法用
+#       procd_set_param respawn 0 0 0
+#   并注释为「不做 respawn」——**语义恰好相反**：procd 的三个 0 表示无限重启，
+#   脚本一退出就被立刻再拉起来。实机证据：识别成功后同一秒内出现 8 次以上
+#   qmodem-rescan 启动记录（pid 13730/13742/13765/13778/13800/...），形成热循环。
+#   所以这里改用传统 init.d（非 procd）在后台起一次，不再自动重启。
 
 START=92
 STOP=08
-USE_PROCD=1
 
-start_service() {
-	procd_open_instance
-	procd_set_param command /usr/sbin/qmodem-rescan
-	procd_set_param stdout 1
-	procd_set_param stderr 1
-	# 本实例只跑一轮补扫后自然退出，不做 respawn
-	procd_set_param respawn 0 0 0
-	procd_close_instance
+PIDFILE=/var/run/qmodem-rescan.pid
+
+start() {
+	# 后台执行，不阻塞 rcS；脚本自带时间点阶梯与 daemon 重启兜底。
+	/usr/sbin/qmodem-rescan >/dev/null 2>&1 &
+	echo $! >"$PIDFILE"
+}
+
+stop() {
+	[ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+	rm -f "$PIDFILE"
 }

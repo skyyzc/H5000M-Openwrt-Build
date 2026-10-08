@@ -1,20 +1,42 @@
 #!/bin/sh
 # QModem 模组识别补扫器（Hiveton H5000M 时序补偿）
 #
-# 背景见 /etc/init.d/qmodem-rescan 头部注释。这里只做一件事：
-# 在开机后的若干时间点各触发一次 QModem 官方扫描入口，直到识别成功为止。
+# 背景见 /etc/init.d/qmodem-rescan 头部注释。职责：开机后在若干时间点各触发一次
+# QModem 官方扫描入口；**全部失败则重启 QModem 的扫描 daemon 再试一次**。
 #
 # 用法：
-#   qmodem-rescan            按内置时间点补扫（由 init 服务调用）
-#   qmodem-rescan --now      立即补扫一次（排障用）
+#   qmodem-rescan            按内置时间点补扫，末尾接一次 daemon 重启兜底
+#   qmodem-rescan --now      立即补扫一次（排障用，不重启 daemon）
+#   qmodem-rescan --fix      立即重启 daemon 并补扫（排障用）
 #   qmodem-rescan --status   只查询当前是否已识别
 #
-# 判定「已识别」：qmodem uci 中存在 modem-device 配置节。
-# 与 QModem 自身状态完全解耦，不修改 QModem 任何文件或配置。
+# 判定「已识别」：qmodem uci 中存在 modem-device 配置节。与 QModem 自身状态解耦，
+# 不修改 QModem 任何文件或 uci 配置。
+#
+# ── 2026-10-08 内存启动实机修正（三处，均有实测证据）──────────────────────
+# 1. ★ 补扫救不回「启动窗口内失败」的 daemon，唯一有效动作是重启它。
+#    证据：首个 daemon 实例在 45s/80s/120s 三个时间点的补扫 + 手动 --now 共 4 次
+#    全部复现 "slot=2-1 type=usb modem profile not matched"；随后
+#    /etc/init.d/qmodem_init restart（换出新 daemon）→ 第一次 scan 即
+#    "added modem section=2_1 name=rg520n-cn type=usb ports=2 valid=2" 并开始拨号。
+#    反证：健康的 daemon 能被反复重新识别（删掉 uci section 后 scan 立刻重建），
+#    所以坏的不是扫描机制，而是那一个 daemon 实例的状态。
+#    ⇒ 本脚本把「重启 daemon」放在阶梯末尾兜底，而不是无限补扫下去。
+# 2. ★ rc 不可依赖。modem_scanc 对 scan 是**异步**语义：立刻返回
+#    {"code":0,"message":"queued"} 且 rc=0（实测）。官方 /usr/share/qmodem/modem_scan.sh
+#    里 "rc==2 就先 /etc/init.d/qmodem_init start 再重试" 的兜底，对 scan 动作是
+#    **死代码**，永远命不中。所以本脚本只认 uci 结果，不看 rc；并用
+#    wait_recognized() 轮询等待落定，而不是定长 sleep（慢启动时读得太早会误判）。
+# 3. 支持库内容与识别结果**因果绑定**（双向实测）：库里有 rg520n-cn → 识别成功；
+#    把库退回 /usr/share/qmodem/modem_support.json.bak（无该条目）→ 必然
+#    profile not matched；换回来 → 又识别。排障时可用它制造/消除「库缺型号」态。
 
 SCAN_SH="/usr/share/qmodem/modem_scan.sh"
+INIT_SCAND="/etc/init.d/qmodem_init"
 TAG="qmodem-rescan"
 POINTS="20 45 80 120 180"
+SETTLE=12	# 单次扫描后最多轮询等待秒数（异步扫描落定）
+RESTART_WAIT=20	# 重启 daemon 后等它把端口枚举完
 
 log() {
 	logger -t "$TAG" "$1" 2>/dev/null || true
@@ -25,11 +47,28 @@ recognized() {
 	uci -q show qmodem 2>/dev/null | grep -q "=modem-device"
 }
 
+wait_recognized() {
+	local i=0
+	while [ "$i" -lt "$SETTLE" ]; do
+		recognized && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	recognized
+}
+
 scan_once() {
 	[ -x "$SCAN_SH" ] || { log "未找到 $SCAN_SH，跳过"; return 1; }
 	"$SCAN_SH" scan usb >/dev/null 2>&1
-	sleep 3
-	recognized
+	wait_recognized
+}
+
+restart_scand_then_scan() {
+	[ -x "$INIT_SCAND" ] || { log "未找到 $INIT_SCAND，跳过"; return 1; }
+	log "重启 QModem 扫描 daemon 后重试（唯一实测有效的动作）"
+	"$INIT_SCAND" restart >/dev/null 2>&1
+	sleep "$RESTART_WAIT"
+	scan_once
 }
 
 case "$1" in
@@ -46,12 +85,24 @@ case "$1" in
 			log "手动补扫成功，模组已识别"
 			exit 0
 		fi
-		log "手动补扫后仍未识别"
+		log "手动补扫后仍未识别（如需强制恢复请用 --fix）"
+		exit 1
+		;;
+	--fix)
+		if recognized; then
+			log "已是识别状态，无需修复"
+			exit 0
+		fi
+		if restart_scand_then_scan; then
+			log "重启 daemon 后补扫成功，模组已识别"
+			exit 0
+		fi
+		log "重启 daemon 后仍未识别"
 		exit 1
 		;;
 esac
 
-# 默认：按时间点补扫
+# 默认：按时间点补扫，末尾接一次 daemon 重启兜底
 if recognized; then
 	log "启动时已识别，无需补扫"
 	exit 0
@@ -70,5 +121,11 @@ for t in $POINTS; do
 	fi
 done
 
-log "补扫结束仍未识别，等待后续 USB 热插拔事件"
+log "补扫阶梯走完仍未识别 → 转入 daemon 重启兜底"
+if restart_scand_then_scan; then
+	log "重启 daemon 后补扫成功，模组已识别"
+	exit 0
+fi
+
+log "补扫与 daemon 重启均未识别，等待后续 USB 热插拔事件"
 exit 1

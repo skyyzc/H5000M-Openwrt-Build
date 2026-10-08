@@ -7,6 +7,15 @@
 [ -x /etc/init.d/higoros ] && /etc/init.d/higoros enable
 [ -x /etc/init.d/fancontrol ] && /etc/init.d/fancontrol enable
 
+# 1b) QModem 模组识别补扫服务
+#     镜像里确实出现过 S92 软链，但仓库里没有任何一行显式启用它（uci-defaults 与
+#     构建脚本都没有），说明它靠的是构建期的隐式行为。这里显式补上，不再依赖隐式：
+#     脚本自带 START=92，enable 会生成 S92/K08。
+#     注意：uci-defaults 跑在 /etc/init.d/boot (START=10) 内，而 rcS 在开始时就
+#     展开了一次 /etc/rc.d/S* 列表 —— 所以**刷机后的首次开机**这一轮可能不在列表里，
+#     第二次开机起必然生效（与原有的隐式机制行为一致）。
+[ -x /etc/init.d/qmodem-rescan ] && /etc/init.d/qmodem-rescan enable
+
 # 2) 若底座带了其他风扇后台，禁掉，避免两个控制器抢 pwm
 #    （海狗页 + /usr/bin/fancontrol v2 是唯一管理者）
 for SVC in h5000m-fancontrol fancontrol-h5000m; do
