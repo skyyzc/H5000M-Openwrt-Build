@@ -1,0 +1,47 @@
+#!/bin/sh /etc/rc.common
+# 在 qmodem_init（S80）之前，把本板附带的模组定义合并进 QModem 的支持库。
+#
+# 为什么需要这个服务
+# ------------------
+# qmodem_init 启动的 modem_scand 在**启动时**读一次
+# /usr/share/qmodem/modem_support.json 并把它缓存在内存里；此后每一轮扫描
+# 用的都是那份缓存，不会重读文件。
+#
+# 而那个文件的**镜像版本不含 RG520N-CN** —— 该条目由 luci-app-qmodem-generic
+# 的 qmodem-modem-support 服务在运行时 merge 进去。它的 START 是 90，排在
+# qmodem_init 的 80 之后。于是 daemon 在一个「还不认识这块模组」的库上启动，
+# 之后每一次扫描都报 `slot=2-1 type=usb modem profile not matched`，
+# 无论补扫多少次都无效，只有重启 daemon 让它重读库才行。
+#
+# 实测（2026-10-08，initramfs 内存启动验收，同一台设备）
+# -----------------------------------------------------
+#   镜像原版库 modem_support.json：rg520n-cn 出现 0 次（.bak，77722 B）
+#   运行期 merge 之后          ：出现 1 次（78356 B，mtime 即合并时刻）
+#   启动序号                    ：S80 qmodem_init → S90 qmodem-modem-support
+#   S80 那个 daemon            ：profile not matched；补扫 45/80/120s 加手动
+#                                --now 共 4 次全部失败，最后 give up after 5 attempts
+#   重启 daemon 后             ：首次扫描即 added modem section=2_1 name=rg520n-cn
+#                                type=usb ports=2 valid=2，随即 Start Dial
+#   把库退回 .bak（无该条目）后重启 daemon：失败复现；换回来又成功
+#   ⇒ 因果成立：库内容决定成败，daemon 只在启动时读它。
+#
+# 本服务把合并**提前到 daemon 启动之前，并且同步执行** —— 同步是关键：
+# 只有 start() 返回之后才继续跑 S79/S80，daemon 才必然读到已合并的库。
+#
+# 注入器 /usr/sbin/qmodem-modem-support 由 luci-app-qmodem-generic 提供，本身
+# 幂等（型号已存在即跳过，日志写 syslog），写入前有 .bak，写完用 jsonfilter
+# 校验、失败自动回滚。因此 S90 那一遍会自然退化成空操作，重复执行无害。
+START=78
+STOP=06
+
+start() {
+	# 未安装 QModem 或未装 luci-app-qmodem-generic 时静默跳过。
+	[ -x /usr/sbin/qmodem-modem-support ] || return 0
+	/usr/sbin/qmodem-modem-support >/dev/null 2>&1
+	return 0
+}
+
+stop() {
+	# 无事可做：本服务只做一次文件合并，不驻留任何进程。
+	return 0
+}

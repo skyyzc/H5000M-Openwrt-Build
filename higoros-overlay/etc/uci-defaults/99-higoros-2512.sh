@@ -7,7 +7,14 @@
 [ -x /etc/init.d/higoros ] && /etc/init.d/higoros enable
 [ -x /etc/init.d/fancontrol ] && /etc/init.d/fancontrol enable
 
-# 1b) QModem 模组识别补扫服务
+# 1b) QModem 模组支持库的**提前合并**（START=78，早于 qmodem_init 的 80）
+#     modem_scand 只在启动时读一次支持库并缓存，而库的镜像版本不含 RG520N-CN
+#     （那一条由 luci-app-qmodem-generic 的 S90 服务运行时 merge）。不提前合并，
+#     daemon 就带着「不认识这块模组」的库启动，之后所有补扫都报 profile not matched。
+#     该服务同步执行注入器，且注入器幂等，因此 S90 那一遍自然退化为空操作。
+[ -x /etc/init.d/qmodem-support-early ] && /etc/init.d/qmodem-support-early enable
+
+# 1c) QModem 模组识别补扫服务
 #     镜像里确实出现过 S92 软链，但仓库里没有任何一行显式启用它（uci-defaults 与
 #     构建脚本都没有），说明它靠的是构建期的隐式行为。这里显式补上，不再依赖隐式：
 #     脚本自带 START=92，enable 会生成 S92/K08。
