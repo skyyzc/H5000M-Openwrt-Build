@@ -93,11 +93,18 @@ H5000M 的 U-Boot 自带 failsafe，上传 initramfs 镜像后系统在内存里
 
 | 进入方式 | 做法 | 地址 |
 | --- | --- | --- |
-| 按住 reset 上电 | 开机前按住复位键 | <http://192.168.9.1> |
-| U-Boot 的 DHCP | 电脑网卡设自动获取 | <http://failsafe.lan> |
-| **系统内一句话** | 在现有系统里执行 `to-failsafe` | 重启后进上面那个页面 |
+| **按住 reset 上电**（唯一能让页面真正可用的方式） | 按住复位键 → 上电 → 保持 5~10 秒 → 松开；电脑网卡设自动获取 | <http://192.168.9.1>（别名 <http://failsafe.lan>） |
 
-`to-failsafe` 改的是 U-Boot 环境里的 `failsafe` 标志（`/etc/fw_env.config` 已就位），**不刷任何分区**。这个标志是**一次性**的：进了那个页面就会被自动抹掉。想主动放弃，用 `fw_setenv failsafe` 删掉它。这个页面上的 `factory` 功能**不要点**——它动的是 EEPROM。
+> **⚠ 系统内执行 `to-failsafe`：进得去，但网络起不来。** 它写的是 U-Boot 环境里的 `failsafe`
+> 标志（`/etc/fw_env.config` 已就位），**不刷任何分区**，U-Boot 也确实认得它、不再跑 `bootcmd`。
+> 但**实测**走这条路重启后，电脑网卡会停在 APIPA `169.254.x`，`ping 192.168.9.1` 报
+> "无法访问目标主机"、`arp -a` 零动态条目 —— **那个页面上根本没有东西在应答，够不着。**
+> ⇒ 要操作 failsafe 页面，**只能按 reset 上电**。`to-failsafe` 的定位是"先把标志置上，
+> 等人到设备跟前再按 reset"，而不是远程一条命令搞定。
+>
+> 标志是**一次性**的：进了那个页面就会被自动抹掉。主动放弃用 `fw_setenv failsafe`（删）或
+> `to-failsafe -C`（清）。该工具的接口：`-n` 只置标志不重启（**不是 dry-run**）、`-c` 查、`-C` 清。
+> 页面上的 `factory` 功能**不要点**——它动的是 EEPROM。
 
 > 内存启动的系统 root 是空口令，SSH 用 `auth_none` 即可。
 
