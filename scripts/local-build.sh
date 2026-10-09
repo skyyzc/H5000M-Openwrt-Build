@@ -2149,10 +2149,33 @@ bake_modem_support() {
 		return 0
 	fi
 
-	extra="${SRC}/package/luci-app-qmodem-generic/root/usr/share/qmodem-generic/extra_modem_support.json"
-	if [ ! -f "$extra" ]; then
-		die "QModem is enabled but ${extra} is missing — the panel clone did not land where expected. Refusing to build an image whose RG520N-CN entries would have to be merged at runtime."
+	# Locate the panel's extra definitions by search, not by a hard-coded path.
+	#
+	# The upstream repository nests the package one level below its own root:
+	# the clone lands at package/luci-app-qmodem-generic/ while the package
+	# itself is package/luci-app-qmodem-generic/luci-app-qmodem-generic/.
+	# Upstream reorganised this tree once already (221f1a10, "维护：整理仓库
+	# 结构"), and the 2.4.11-r18 firmware was built from exactly that nested
+	# layout — so the nesting is normal and the build system finds it; only a
+	# hand-written path was wrong.  That wrong path cost a red run on
+	# 2026-10-09, which is the cheap version of the failure this function
+	# exists to prevent, but it is still a guess.  Stop guessing.
+	extra=""
+	local extra_hits extra_count
+	extra_hits="$(find "${SRC}/package/luci-app-qmodem-generic" \
+		-path '*/.git' -prune -o \
+		-type f -name 'extra_modem_support.json' -print 2>/dev/null | sort)"
+	extra_count="$(printf '%s\n' "$extra_hits" | grep -c . || true)"
+
+	if [ "$extra_count" -eq 0 ]; then
+		die "QModem is enabled but extra_modem_support.json was not found anywhere under package/luci-app-qmodem-generic/. Refusing to build an image whose RG520N-CN entries would have to be merged at runtime."
 	fi
+	if [ "$extra_count" -gt 1 ]; then
+		printf '%s\n' "$extra_hits" | sed 's/^/      /' >&2
+		die "Found ${extra_count} candidate extra_modem_support.json files — refusing to guess which one this firmware should carry."
+	fi
+	extra="$extra_hits"
+	log "Panel modem definitions: ${extra#"${SRC}/"}"
 
 	# The library ships as a static file inside the qmodem feed package; find it
 	# rather than hard-coding the feed layout, since the feed directory name and
@@ -2174,6 +2197,7 @@ EOF
 	if [ -z "$lib" ]; then
 		die "QModem is enabled but its modem_support.json was not found under feeds/ or package/. Refusing to build: without it every RG520N-CN board would need a daemon restart after each boot."
 	fi
+	log "QModem support library: ${lib#"${SRC}/"}"
 
 	if ! command -v python3 >/dev/null 2>&1; then
 		die "python3 is required to merge the modem support library (it is part of the documented toolchain)"

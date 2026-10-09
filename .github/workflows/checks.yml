@@ -172,6 +172,23 @@ jobs:
           done
           echo "all scripts parse"
 
+      - name: bake_modem_support finds the panel data in any layout
+        run: |
+          set -euo pipefail
+          # It located extra_modem_support.json by a hand-written path until
+          # 2026-10-09, and the upstream repository nests the package one level
+          # deeper than that path assumed (it reorganised its tree once before,
+          # in 221f1a10).  The gate refused the build, which is the cheap
+          # failure — nineteen minutes instead of a four-hour compile that
+          # ships an image merging those entries at runtime — but the cause was
+          # still a guess.  The location is discovered with `find` now, and this
+          # step pins that: a fixed path goes red here, not in the build.
+          #
+          # It also pins the two refusal paths.  "Nothing found" and "two
+          # candidates found" must both stop the build; picking one silently is
+          # exactly the silent no-op the whole function exists to prevent.
+          bash ./scripts/test-bake-modem-support.sh
+
       - name: ShellCheck (errors only)
         run: |
           set -euo pipefail
