@@ -2114,6 +2114,88 @@ install_qmodem_extras() {
 	return 0
 }
 
+# Bake the extra modem definitions into QModem's own support library, inside the
+# image, so that modem_scand reads a complete library no matter when it starts.
+#
+# This exists because merging at runtime loses a race that cannot be won from
+# rc.d.  Measured on hardware (2026-10-09, H5000M, RG520N-CN):
+#
+#   13.6 s  USB modem binds -> /etc/hotplug.d/usb/20-modem-usb fires
+#   14.5 s  modem_scan.sh's scanc fallback sees rc=2 ("no daemon yet"), runs
+#           /etc/init.d/qmodem_init start; modem_scand starts HERE and caches
+#           the library it reads at this instant
+#   15.6 s  rc.d finally reaches the merge service; the file gains rg520n-cn
+#   after   the daemon still holds the pre-merge library, so scanning reports
+#           `slot=2-1 type=usb modem profile not matched`, spends its 5 retries
+#           and gives up.  The modem never comes up.
+#
+# Moving the merge service to START=78 (ahead of qmodem_init's 80) was tried and
+# does not help: the hotplug fallback starts the daemon without ever consulting
+# rc.d.  Baking the file into the image removes the race rather than racing it.
+#
+# The runtime service (higoros-overlay/etc/init.d/qmodem-support-early) stays as
+# a safety net for definitions added after this mirror was assembled; with the
+# bake in place it finds nothing to do.
+#
+# A missing input or a result without the required model is fatal on purpose: a
+# silent no-op here is exactly the bug this function exists to prevent, and it
+# would only surface as "modem not recognised" on a flashed device.
+bake_modem_support() {
+	local lib extra out
+	local required="rg520n-cn"
+
+	if ! is_true "$ENABLE_QMODEM"; then
+		log "QModem disabled — skipping the modem support library merge"
+		return 0
+	fi
+
+	extra="${SRC}/package/luci-app-qmodem-generic/root/usr/share/qmodem-generic/extra_modem_support.json"
+	if [ ! -f "$extra" ]; then
+		die "QModem is enabled but ${extra} is missing — the panel clone did not land where expected. Refusing to build an image whose RG520N-CN entries would have to be merged at runtime."
+	fi
+
+	# The library ships as a static file inside the qmodem feed package; find it
+	# rather than hard-coding the feed layout, since the feed directory name and
+	# the package's own subdirectory have both changed upstream before.
+	lib=""
+	local candidate
+	while IFS= read -r candidate; do
+		# Never patch the generic panel's own copy: that one is the source of the merge.
+		case "$candidate" in
+		*luci-app-qmodem-generic*) continue ;;
+		esac
+		lib="$candidate"
+		break
+	done <<EOF
+$(find "${SRC}/feeds" "${SRC}/package" -type f \
+	-path '*/files/usr/share/qmodem/modem_support.json' 2>/dev/null | sort)
+EOF
+
+	if [ -z "$lib" ]; then
+		die "QModem is enabled but its modem_support.json was not found under feeds/ or package/. Refusing to build: without it every RG520N-CN board would need a daemon restart after each boot."
+	fi
+
+	if ! command -v python3 >/dev/null 2>&1; then
+		die "python3 is required to merge the modem support library (it is part of the documented toolchain)"
+	fi
+
+	log "Baking extra modem definitions into ${lib#"${SRC}/"}"
+	if ! python3 "${ROOT_DIR}/scripts/merge_modem_support.py" "$lib" "$extra" \
+		--require "$required"; then
+		die "Merging ${extra} into ${lib} failed — see the error above"
+	fi
+
+	# Read it back from disk: the point of the exercise is the bytes that end up
+	# in the image, not the bytes the merge reported writing.
+	if ! grep -q "\"${required}\"" "$lib"; then
+		die "Post-merge verification failed: ${lib} does not contain ${required}"
+	fi
+	out="$(wc -c <"$lib" | tr -d ' ')"
+	log "Modem support library ready: ${out} bytes, includes ${required}"
+
+	return 0
+}
+
 # Argon lives in two repositories outside every feed, so it is cloned into
 # package/ exactly like the board plugins rather than pulled from a feed.
 # Both Makefiles include $(TOPDIR)/feeds/luci/luci.mk, so this has to run after
@@ -4645,6 +4727,11 @@ main() {
 	install_local_packages
 	install_board_plugins
 	install_qmodem_extras
+	# Needs the panel clone install_qmodem_extras just made (it holds the extra
+	# definitions) and the qmodem feed (it holds the library).  Runs before
+	# anything reads the tree, and long before `make`, so a missing input fails
+	# the run in minutes instead of after a four-hour compile.
+	bake_modem_support
 	install_theme
 	stage_higoros_overlay
 	install_external_packages
