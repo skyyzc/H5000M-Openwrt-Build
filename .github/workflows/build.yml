@@ -1236,6 +1236,13 @@ jobs:
             rel_name="openwrt-${rev}"
           fi
 
+          # Display title only; the tag keeps the full hash so a release is
+          # always traceable back to the exact upstream commit.  A 40-char hash
+          # in the title is unreadable noise — cut it to the r0-<short> form
+          # the firmware itself reports in /etc/openwrt_release.
+          title_rev="${rel_name#openwrt-}"
+          if (( ${#title_rev} > 12 )); then title_rev="r0-${title_rev:0:7}"; fi
+
           # Every firmware image this build produces, not just the sysupgrade
           # one: the initramfs is the recovery image, and the rootfs tarball is
           # what a chroot or container needs.  A release that carries only one of
@@ -1265,6 +1272,13 @@ jobs:
           abi="$(sed -n 's/^kernel_abi=//p' BUILD-INFO.txt)"
           nfiles="$(printf '%s\n' "${files[@]}" | wc -l)"
 
+          # Checksum manifest over exactly the files shipped above, so any
+          # download can be verified offline.  Generated after `files` is final
+          # and appended to it — never matched by the `find` below.
+          : > sha256sums.txt
+          for f in "${files[@]}"; do sha256sum "${f#./}" >> sha256sums.txt; done
+          files+=("./sha256sums.txt")
+
           notes="主线 OpenWrt（openwrt/openwrt main）Hiveton H5000M 固件。
 
           上游版本：${rev}
@@ -1280,9 +1294,12 @@ jobs:
           *initramfs-kernel.bin 同一份 FIT）是 U-Boot failsafe 页面上传用的
           内存镜像；*targz-rootfs.tar.gz 供容器或 chroot 使用。
           内核 ABI 见 BUILD-INFO.txt，安装内核模块时必须与固件一致。
+          校验：sha256sums.txt 覆盖本 Release 全部资产。
 
-          一句话进 failsafe：to-failsafe（= fw_setenv failsafe 1 && reboot），
-          之后电脑接 LAN、DHCP 打开 http://192.168.9.1 或 http://failsafe.lan。
+          进 failsafe：按住 reset 再上电（保持 5~10 秒后松开），电脑 LAN
+          设自动获取，打开 http://192.168.9.1 或 http://failsafe.lan。
+          系统内 to-failsafe 也能让设备进入 failsafe，但其网络实测起不来
+          （2026-10-09），够不着 Web UI——不要依赖这条路。
 
           软件包仓库：https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
 
@@ -1293,7 +1310,7 @@ jobs:
             gh release upload "${rel_name}" "${files[@]}" --clobber
           else
             gh release create "${rel_name}" "${files[@]}" \
-              --title "H5000M mainline OpenWrt ${rel_name}" \
+              --title "H5000M mainline OpenWrt ${title_rev}" \
               --notes "${notes}"
           fi
 
