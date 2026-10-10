@@ -154,9 +154,21 @@ WWAND_REPO_BRANCH="${WWAND_REPO_BRANCH:-main}"
 
 # OpenAppFilter — destan19/OpenAppFilter (appfilter userspace + kmod-oaf +
 # luci-app-oaf).  Not in any official feed; pulled in as its own feed.
+#
+# Pinned to v6.1.8 on purpose.  higorosd talks to the CLASSIC OpenAppFilter
+# API: ubus object "appfilter" with methods get_oaf_status / get_app_filter /
+# set_app_filter, a feature base at /etc/appfilter/feature.cfg, and a status
+# reply carrying engine_version + kernel_version (all four strings verified
+# inside the higorosd binary).  Upstream master (>= 7.0) is the "fwx" variant:
+# its daemon registers ubus object "fwx" with only common/debug methods and
+# moves the feature base to /etc/fwxd/feature.bin.  The panel then reports
+# "engine not ready" / "--" and the device page stays empty forever.  Live
+# evidence 2026-10-10: firmware with the 7.0.1 feed had kmod-oaf loaded and
+# oafd running, yet `ubus list` showed no object higorosd could call.
+# If you bump this tag, re-verify the ubus surface against higorosd first.
 ENABLE_OAF="${ENABLE_OAF:-false}"
 OAF_REPO_URL="${OAF_REPO_URL:-https://github.com/destan19/OpenAppFilter.git}"
-OAF_REPO_BRANCH="${OAF_REPO_BRANCH:-master}"
+OAF_REPO_BRANCH="${OAF_REPO_BRANCH:-v6.1.8}"
 
 # openwrt-passwall — the passwall and passwall2 front-ends plus the core
 # packages they depend on.  Not in any official feed, and this is the main
@@ -3674,6 +3686,11 @@ build_required_packages() {
 	# not a symbol at all and defconfig drops it silently.
 	is_true "$ENABLE_OAF" && REQUIRED_PACKAGES+=(luci-app-oaf appfilter kmod-oaf)
 	is_true "$ENABLE_HIGOROS" && REQUIRED_PACKAGES+=(kmod-hwmon-pwmfan uboot-envtools)
+	# higorosd's disk page shells out to lsblk (its error message is literally
+	# "exec: 'lsblk': executable file not found in $PATH").  BusyBox has no
+	# lsblk applet and the panel module is unconditional, so this package is
+	# too.  Verified live 2026-10-10: `apk add lsblk` made the page work.
+	REQUIRED_PACKAGES+=(lsblk)
 
 	# Required, not cosmetic.  Every line above is `is_true X && ...`, so when
 	# the LAST switch is off the final statement returns 1 and — because this
