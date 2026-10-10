@@ -1253,6 +1253,76 @@ verify_oaf_feed() {
 	return 0
 }
 
+# OpenAppFilter v6.1.8 is 2023 code and the kernel moved on: 6.18 promotes
+# -Wmissing-prototypes and -Wunused-variable to errors, and every violation
+# lives in oaf/src/app_filter.c.  Measured on run 38023356319 — the run that
+# first pinned the feed to v6.1.8:
+#
+#   app_filter.c:1207:5: error: no previous prototype for 'dpi_main'
+#                        [-Werror=missing-prototypes]
+#   app_filter.c:1257:18: error: unused variable 'drop' [-Werror=unused-variable]
+#   cc1: all warnings being treated as errors
+#
+# ★ The interesting part is what did NOT work.  oaf/Makefile already passes
+#   -Wno-missing-prototypes and -Wno-unused-variable through EXTRA_CFLAGS, and
+#   the build still died on exactly those two.  So the kernel's flags are being
+#   applied somewhere our EXTRA_CFLAGS is not, and adding more -Wno-* to the
+#   same variable is guesswork dressed up as a fix.
+#
+#   A pragma is not guesswork.  `#pragma GCC diagnostic ignored` is processed
+#   while the translation unit is parsed, so it governs every line that follows
+#   regardless of where the command line put its flags.  It also keeps each fix
+#   in the file it belongs to, and the marker comment makes a re-run idempotent
+#   instead of stacking a second copy.
+#
+#   The alternative — writing the twelve missing prototypes — means reconstructing
+#   signatures from callers spread across nine files, for a daemon upstream no
+#   longer maintains.  That is a rewrite, not a fix.
+#
+# -Wno-error goes on as a second layer: if a future kernel grows an -Werror the
+# pragma does not name, this catches it.  It is appended to the existing :=
+# assignment rather than added as a new line, because a second assignment would
+# replace it rather than extend it.
+patch_oaf_werror() {
+	local feed="${SRC}/feeds/oaf" f mk n=0
+
+	is_true "$ENABLE_OAF" || return 0
+	[ -d "$feed" ] || return 0
+
+	while IFS= read -r f; do
+		grep -q 'relax the 6\.18 -Werror wall' "$f" 2>/dev/null && continue
+		{
+			printf '%s\n' \
+				'/* h5000m: relax the 6.18 -Werror wall for 2023-era code; see scripts/local-build.sh patch_oaf_werror(). */' \
+				'#pragma GCC diagnostic ignored "-Wmissing-prototypes"' \
+				'#pragma GCC diagnostic ignored "-Wunused-variable"' \
+				'#pragma GCC diagnostic ignored "-Wunused-but-set-variable"'
+			cat "$f"
+		} >"${f}.h5000m" && mv "${f}.h5000m" "$f"
+		n=$((n + 1))
+	done < <(find "$feed" -name '*.c' -type f 2>/dev/null)
+
+	if [ "$n" -eq 0 ]; then
+		# The feed layout moved, so the fix did NOT apply and the build will
+		# fail four hours from now on a warning we could see today.  Say so here.
+		warn "oaf: no .c files found under ${feed} — the -Werror fix did NOT apply"
+	else
+		log "oaf: relaxed -Werror in ${n} source file(s)"
+	fi
+
+	mk="${feed}/oaf/Makefile"
+	if [ -f "$mk" ] && ! grep -q 'h5000m-no-error' "$mk"; then
+		sed -i 's/^\(EXTRA_CFLAGS:=.*\)$/\1 -Wno-error # h5000m-no-error/' "$mk"
+		if grep -q 'h5000m-no-error' "$mk"; then
+			log "oaf: appended -Wno-error to EXTRA_CFLAGS"
+		else
+			warn "oaf: could not append -Wno-error (EXTRA_CFLAGS line not found)"
+		fi
+	fi
+
+	return 0
+}
+
 # The ddimension feed is not one directory per package: `wwand/Makefile` alone
 # defines wwand plus its qmi/mbim/ncm/mhi/esim/datapath subpackages.  So check
 # the package *definitions* where they actually live, and only look for a
@@ -3685,7 +3755,43 @@ build_required_packages() {
 	# PACKAGE_kmod-oaf.  Verified against the Makefiles — `open-app-filter` is
 	# not a symbol at all and defconfig drops it silently.
 	is_true "$ENABLE_OAF" && REQUIRED_PACKAGES+=(luci-app-oaf appfilter kmod-oaf)
-	is_true "$ENABLE_HIGOROS" && REQUIRED_PACKAGES+=(kmod-hwmon-pwmfan uboot-envtools)
+	if is_true "$ENABLE_HIGOROS"; then
+		REQUIRED_PACKAGES+=(kmod-hwmon-pwmfan uboot-envtools
+			# ★ The packages the panel's own menus call into.  The 2026-10-10
+			# audit (old rootfs opkg/status, 587 packages, against a live probe
+			# of 95 endpoints) found the panel renders these pages, the forms
+			# submit, and nothing happens — because the command behind the form
+			# was in the vendor image and is not here.  "其他设置" is really a
+			# Tailscale / ZeroTier / Watchcat / KSMBD / disk-partition console,
+			# and most of its endpoints answer 200 while the binary is absent.
+			#
+			# ★ Every name here was checked with `apk search -x` against the
+			#   live official index (10106 packages) before being written.  That
+			#   is not optional: a REQUIRED_PACKAGES entry that does not exist is
+			#   a build failure four hours in, and the audit's own list contained
+			#   five names this feed does not have — luci-app-zerotier,
+			#   qfirehose, wrtbwmon, kmod-fs-ntfs3, ntfs3-mount.  None of them is
+			#   here, and the panel's ZeroTier page is driven by higorosd, so the
+			#   bare `zerotier` daemon is the whole fix for that one.
+			#
+			#   kmod-fs-ksmbd is likewise absent: 6.18 builds the module in, and
+			#   ksmbd-server is the userspace half that is actually missing.
+			ksmbd-server luci-app-ksmbd
+			zerotier
+			luci-app-watchcat
+			ddns-scripts luci-app-ddns
+			# Disk management.  luci-app-diskman is already in the image; without
+			# these its partition and format dialogs fail on a missing binary.
+			parted e2fsprogs dosfstools exfat-mkfs exfat-fsck f2fs-tools
+			smartmontools ntfs-3g-utils block-mount
+			kmod-fs-exfat kmod-fs-ext4 kmod-fs-vfat
+			# Windows network neighbourhood discovery, and the shells the
+			# panel's terminal page is expected to offer.
+			wsdd2 bash htop btop nano
+			# Timezone data: the region selector writes a TZ name, and without
+			# zoneinfo the kernel refuses it.
+			zoneinfo-core zoneinfo-asia)
+	fi
 	# higorosd's disk page shells out to lsblk (its error message is literally
 	# "exec: 'lsblk': executable file not found in $PATH").  BusyBox has no
 	# lsblk applet and the panel module is unconditional, so this package is
@@ -4788,6 +4894,11 @@ main() {
 	# alone (see patch_nikki_ebpf_bypass_defaults).
 	patch_nikki_ebpf_bypass_defaults
 	install_nftables_patches
+	# Needs the oaf feed that prepare_feeds just checked out, and must run
+	# before `make`: the fix is a source-level pragma, so it has to be on disk
+	# before the compile starts.  Cheap (a find and a sed) and it fails loudly
+	# if the feed layout has moved, instead of four hours later in the compile.
+	patch_oaf_werror
 	install_proxy_repos
 
 	# Both of these must come after install_proxy_repos: it is the step that
