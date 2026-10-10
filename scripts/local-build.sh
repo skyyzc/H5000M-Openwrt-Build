@@ -1284,12 +1284,13 @@ verify_oaf_feed() {
 # assignment rather than added as a new line, because a second assignment would
 # replace it rather than extend it.
 patch_oaf_werror() {
-	local feed="${SRC}/feeds/oaf" f mk n=0
+	local feed="${SRC}/feeds/oaf" f mk found=0 patched=0
 
 	is_true "$ENABLE_OAF" || return 0
 	[ -d "$feed" ] || return 0
 
 	while IFS= read -r f; do
+		found=$((found + 1))
 		grep -q 'relax the 6\.18 -Werror wall' "$f" 2>/dev/null && continue
 		{
 			printf '%s\n' \
@@ -1299,15 +1300,22 @@ patch_oaf_werror() {
 				'#pragma GCC diagnostic ignored "-Wunused-but-set-variable"'
 			cat "$f"
 		} >"${f}.h5000m" && mv "${f}.h5000m" "$f"
-		n=$((n + 1))
+		patched=$((patched + 1))
 	done < <(find "$feed" -name '*.c' -type f 2>/dev/null)
 
-	if [ "$n" -eq 0 ]; then
-		# The feed layout moved, so the fix did NOT apply and the build will
-		# fail four hours from now on a warning we could see today.  Say so here.
+	# ★ found and patched are counted separately on purpose.  Counting only
+	# "files modified" made the second run of this function - the idempotent one,
+	# where every file already carries the marker and therefore hits `continue` -
+	# report "no .c files found … the fix did NOT apply".  A warning that fires
+	# on the normal path is worse than no warning: it trains the reader to skip
+	# the line that is supposed to mean the feed layout moved.
+	# Caught by _过程脚本/_test_oaf_werror.sh, not by a four-hour build.
+	if [ "$found" -eq 0 ]; then
 		warn "oaf: no .c files found under ${feed} — the -Werror fix did NOT apply"
+	elif [ "$patched" -gt 0 ]; then
+		log "oaf: relaxed -Werror in ${patched} source file(s)"
 	else
-		log "oaf: relaxed -Werror in ${n} source file(s)"
+		log "oaf: -Werror relaxation already in place for all ${found} source file(s)"
 	fi
 
 	mk="${feed}/oaf/Makefile"
