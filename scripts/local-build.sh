@@ -1253,36 +1253,54 @@ verify_oaf_feed() {
 	return 0
 }
 
-# OpenAppFilter v6.1.8 is 2023 code and the kernel moved on: 6.18 promotes
-# -Wmissing-prototypes and -Wunused-variable to errors, and every violation
-# lives in oaf/src/app_filter.c.  Measured on run 38023356319 — the run that
-# first pinned the feed to v6.1.8:
+# OpenAppFilter v6.1.8 is 2023 code and the kernel moved on: the 6.18 build
+# promotes warnings to errors and every violation lives in oaf/src/.  Two runs
+# died here, on two different warning classes, which is the whole point:
 #
-#   app_filter.c:1207:5: error: no previous prototype for 'dpi_main'
-#                        [-Werror=missing-prototypes]
-#   app_filter.c:1257:18: error: unused variable 'drop' [-Werror=unused-variable]
-#   cc1: all warnings being treated as errors
+#   run 38023356319  app_filter.c:1207: error: no previous prototype for
+#                    'dpi_main' [-Werror=missing-prototypes]
+#                    app_filter.c:1257: error: unused variable 'drop'
+#   run 38026410514  app_filter.c:427:40: error: format '%d' expects argument
+#                    of type 'int', but argument 2 has type 'char *'
+#                    [-Werror=format=]
+#                    cc1: all warnings being treated as errors
 #
-# ★ The interesting part is what did NOT work.  oaf/Makefile already passes
-#   -Wno-missing-prototypes and -Wno-unused-variable through EXTRA_CFLAGS, and
-#   the build still died on exactly those two.  So the kernel's flags are being
-#   applied somewhere our EXTRA_CFLAGS is not, and adding more -Wno-* to the
-#   same variable is guesswork dressed up as a fix.
+# ★ The finding, and it is worth internalising: oaf/Makefile ALREADY passes
 #
-#   A pragma is not guesswork.  `#pragma GCC diagnostic ignored` is processed
-#   while the translation unit is parsed, so it governs every line that follows
-#   regardless of where the command line put its flags.  It also keeps each fix
-#   in the file it belongs to, and the marker comment makes a re-run idempotent
-#   instead of stacking a second copy.
+#     EXTRA_CFLAGS:=-Wno-declaration-after-statement -Wno-strict-prototypes \
+#       -Wno-unused-variable ... -Wno-format -Wno-missing-prototypes ...
 #
-#   The alternative — writing the twelve missing prototypes — means reconstructing
-#   signatures from callers spread across nine files, for a daemon upstream no
-#   longer maintains.  That is a rewrite, not a fix.
+#   to the kernel make, and both failures were on warnings that list already
+#   names.  So EXTRA_CFLAGS is not reaching the compiler in this tree —
+#   probably because 6.18 dropped the `ccflags-y += $(EXTRA_CFLAGS)`
+#   compatibility line.  Every -Wno-* added to that variable from now on is
+#   guesswork; the first attempt here proved it by failing a second time.
 #
-# -Wno-error goes on as a second layer: if a future kernel grows an -Werror the
-# pragma does not name, this catches it.  It is appended to the existing :=
-# assignment rather than added as a new line, because a second assignment would
-# replace it rather than extend it.
+#   Hence two mechanisms that do not depend on command-line ordering at all:
+#
+#   1. A pragma.  `#pragma GCC system_header` demotes the rest of the file to
+#      system-header status, where warnings are not diagnosed at all.  It is
+#      evaluated while the translation unit is parsed, so it beats any flag
+#      ordering, and it covers warning classes nobody has seen yet.  Naming
+#      individual -W options would mean discovering them one four-hour build
+#      at a time — exactly what happened between the two runs above.
+#
+#   2. KCFLAGS="-Wno-error".  The kernel Makefile documents KCFLAGS as
+#      "user supplied CFLAGS" and appends it as the LAST assignment to
+#      KBUILD_CFLAGS, which is precisely where -Wno-error must sit to undo
+#      every -Werror= before it.  Scoped to this package by living in this
+#      package's MAKE_OPTS, so no other kernel module is relaxed.
+#
+#   The alternative — writing the twelve missing prototypes and fixing the
+#   format strings — means reconstructing signatures from callers spread
+#   across nine files, for a daemon upstream no longer maintains.  That is a
+#   rewrite, not a fix.
+#
+# ★ Both mechanisms verify themselves and `die` if they did not take.  That is
+#   deliberate: a silent no-op here costs four hours and a full build, while a
+#   failure costs thirty seconds.  The previous revision of this function only
+#   warned, and the warning was wrong on the idempotent path anyway (see the
+#   found/patched comment below).
 patch_oaf_werror() {
 	local feed="${SRC}/feeds/oaf" f mk found=0 patched=0
 
@@ -1291,13 +1309,15 @@ patch_oaf_werror() {
 
 	while IFS= read -r f; do
 		found=$((found + 1))
-		grep -q 'relax the 6\.18 -Werror wall' "$f" 2>/dev/null && continue
+		grep -q 'pragma GCC system_header' "$f" 2>/dev/null && continue
 		{
 			printf '%s\n' \
-				'/* h5000m: relax the 6.18 -Werror wall for 2023-era code; see scripts/local-build.sh patch_oaf_werror(). */' \
-				'#pragma GCC diagnostic ignored "-Wmissing-prototypes"' \
-				'#pragma GCC diagnostic ignored "-Wunused-variable"' \
-				'#pragma GCC diagnostic ignored "-Wunused-but-set-variable"'
+				'/* h5000m: 2023-era DPI code, built by a 6.18 kernel that treats' \
+				' * every warning as an error.  Parse this file quietly instead of' \
+				' * naming warning classes one failed build at a time.' \
+				' * See scripts/local-build.sh, patch_oaf_werror(). */' \
+				'#pragma GCC diagnostic ignored "-Wpragmas"' \
+				'#pragma GCC system_header'
 			cat "$f"
 		} >"${f}.h5000m" && mv "${f}.h5000m" "$f"
 		patched=$((patched + 1))
@@ -1311,22 +1331,24 @@ patch_oaf_werror() {
 	# the line that is supposed to mean the feed layout moved.
 	# Caught by _过程脚本/_test_oaf_werror.sh, not by a four-hour build.
 	if [ "$found" -eq 0 ]; then
-		warn "oaf: no .c files found under ${feed} — the -Werror fix did NOT apply"
+		die "oaf: no .c files under ${feed} — the -Werror fix did NOT apply"
 	elif [ "$patched" -gt 0 ]; then
-		log "oaf: relaxed -Werror in ${patched} source file(s)"
+		log "oaf: marked ${patched} source file(s) for quiet parsing"
 	else
-		log "oaf: -Werror relaxation already in place for all ${found} source file(s)"
+		log "oaf: quiet-parsing marker already present in all ${found} source file(s)"
 	fi
 
 	mk="${feed}/oaf/Makefile"
-	if [ -f "$mk" ] && ! grep -q 'h5000m-no-error' "$mk"; then
-		sed -i 's/^\(EXTRA_CFLAGS:=.*\)$/\1 -Wno-error # h5000m-no-error/' "$mk"
-		if grep -q 'h5000m-no-error' "$mk"; then
-			log "oaf: appended -Wno-error to EXTRA_CFLAGS"
-		else
-			warn "oaf: could not append -Wno-error (EXTRA_CFLAGS line not found)"
-		fi
+	[ -f "$mk" ] ||
+		die "oaf: ${mk} is missing — the -Werror fix did NOT apply"
+	if ! grep -q 'KCFLAGS="-Wno-error"' "$mk"; then
+		grep -q 'EXTRA_CFLAGS="\$(EXTRA_CFLAGS)"' "$mk" ||
+			die "oaf: MAKE_OPTS no longer passes EXTRA_CFLAGS — cannot inject KCFLAGS"
+		sed -i 's|EXTRA_CFLAGS="\$(EXTRA_CFLAGS)"|EXTRA_CFLAGS="$(EXTRA_CFLAGS)" KCFLAGS="-Wno-error"|' "$mk"
 	fi
+	grep -q 'KCFLAGS="-Wno-error"' "$mk" ||
+		die "oaf: could not inject KCFLAGS=\"-Wno-error\" — the -Werror fix did NOT apply"
+	log "oaf: -Werror disabled for this package via KCFLAGS"
 
 	return 0
 }
