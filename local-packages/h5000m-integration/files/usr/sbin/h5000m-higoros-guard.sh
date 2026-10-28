@@ -87,6 +87,23 @@ MT2=$(stat -c %Y "$STATE" 2>/dev/null || echo 0)
 if [ "$MT2" -gt "$MT" ] 2>/dev/null; then
 	log "重启后 state 已恢复更新（mtime $MT -> $MT2）"
 else
-	log "重启后 state 仍未更新（mtime $MT2）—— 下一轮再试，若连续失败请人工检查"
+	# ★ 自愈加深（2026-10-28 v1.2 实测新增一层故障形态）：
+	#   升级后 /tmp/higoros-devices-state.json 是旧系统的遗留（keep.d 之前
+	#   误保留，或 tmpfs 里带着陈旧 mtime），higorosd 读到它之后流量循环
+	#   假死 —— 每分钟重启 mtime 纹丝不动（日志连 3 次实证）。手工删掉
+	#   state + cache 再重启 25 秒内重建真实数据。所以：第一轮重启无效时，
+	#   删掉陈旧 state/cache 再重启一次。higorosd 的 state 本来就在 tmpfs、
+	#   会在下个周期按 /tmp/usage.db 累计值重建，不丢真实数据。
+	log "重启后 state 仍未更新（mtime $MT2）—— 删陈旧 state/cache 后再重启"
+	/etc/init.d/higoros stop >/dev/null 2>&1
+	rm -f "$STATE" /tmp/higoros-devices-cache.json
+	/etc/init.d/higoros start >/dev/null 2>&1
+	sleep 12
+	MT3=$(stat -c %Y "$STATE" 2>/dev/null || echo 0)
+	if [ "$MT3" -gt "$MT" ] 2>/dev/null; then
+		log "删 state 后已重建（mtime $MT2 -> $MT3），流量循环恢复"
+	else
+		log "删 state 重建仍失败（mtime $MT3）—— 连续 3 次到上限后转人工，请检查 higorosd"
+	fi
 fi
 exit 0

@@ -39,6 +39,17 @@ printf '%s' "$SRC" | jq -e '.messages' >/dev/null 2>&1 || { log "ubus 返回不�
 OLD_N=$(jq -r '(.received // []) | length' "$F" 2>/dev/null || echo 0)
 [ -n "$OLD_N" ] || OLD_N=0
 
+# ★ 文件缺失时不能走 --slurpfile（jq 对不存在的 --slurpfile 文件直接报错，
+#   v1.2 刷机后实测：日志每 2 分钟刷一次「合并失败」却毫无动作）。
+#   先补一份空结构再继续，让合并流程自己把库里的短信灌回去。
+if [ ! -s "$F" ] || ! jq -e '.received' "$F" >/dev/null 2>&1; then
+	log "received.json 缺失或损坏，先落一份空结构"
+	printf '{"received": [], "next_id": 1}' >"$F.tmp" 2>/dev/null \
+		&& chmod 600 "$F.tmp" && mv -f "$F.tmp" "$F" \
+		|| { log "写空结构失败，跳过本轮"; exit 0; }
+	OLD_N=0
+fi
+
 MERGED=$(printf '%s' "$SRC" | jq -c --slurpfile old "$F" '
   (($old[0].received) // []) as $o
   | ([.messages[] | select(.type == "received")

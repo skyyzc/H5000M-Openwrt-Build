@@ -30,8 +30,18 @@
 #
 #   加 /etc/h5000m/
 #     采集器的新台账目录（devices-traffic.tsv）。纯旁路存档，留着有用。
+#
+# ★ 2026-10-28 加两条（v1.2 真炸出来的）：
+#
+#   加 /etc/qmodem/sms.sqlite3、/etc/qmodem/2_1_received.json
+#     v1.2 刷机实测：升级把短信全冲掉了。镜像里带这两份同名空文件，
+#     sysupgrade 用空文件覆盖现场数据。短信是运行期唯一不可重建的数据
+#     （qmodem-smsd 收完即从 SIM 删掉），必须进保留清单。
+#     空库文件同路径被旧现场覆盖是期望行为。
 
 /etc/h5000m-wifi-applied
 /etc/h5000m-offload-applied
 /etc/qmodem-worker.conf
 /etc/h5000m
+/etc/qmodem/sms.sqlite3
+/etc/qmodem/2_1_received.json
