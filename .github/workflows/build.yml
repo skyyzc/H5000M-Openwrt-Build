@@ -20,6 +20,10 @@ on:
         type: choice
         options: [github-hosted, self-hosted]
         default: github-hosted
+      cold_build:
+        description: '冷构建（跳过缓存恢复，全量编译；与仓库变量 COLD_BUILD 取或）'
+        type: boolean
+        default: false
       enable_wwand:
         description: '5G 拨号器 ddimension wwand —— 默认关闭：本机是 RG520N-CN + QModem，wwand 会与它抢数据面'
         # Default false, and it matters more than it looks.
@@ -299,10 +303,10 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
-          # COLD_BUILD is a repository variable, not a dispatch input: the input
+          # COLD_BUILD is a repository variable or a dispatch input: the input
           # list is already at GitHub's ceiling of ten.  `true` skips the
           # restore, so every package is compiled from source.
-          COLD_BUILD: ${{ vars.COLD_BUILD || 'false' }}
+          COLD_BUILD: ${{ (github.event_name == 'workflow_dispatch' && inputs.cold_build) || vars.COLD_BUILD || 'false' }}
         run: |
           set -euo pipefail
           image="$(echo "${IMAGE}" | tr '[:upper:]' '[:lower:]')/buildcache"
