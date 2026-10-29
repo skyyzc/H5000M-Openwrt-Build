@@ -39,9 +39,32 @@
 #     （qmodem-smsd 收完即从 SIM 删掉），必须进保留清单。
 #     空库文件同路径被旧现场覆盖是期望行为。
 
+# ★ 2026-10-29 全量盘点（v1.2.1 刷机实测，pre-1028 vs pre-1029 逐文件对比）：
+#   v1.2 那次升级（ABI 变更 c9228974→26c6d486）冲掉的不止短信，还有：
+#     · /etc/config/passwall                34122B(64节点) -> 6353B 残片
+#     · /etc/tailscale/tailscaled.state      2506B(设备身份) -> 2B(Logged out)
+#     · /etc/adguardhome/adguardhome.yaml    5690B -> 0（面板配置全失）
+#     · /etc/adguardhome/work/data/filters/  6.7MB 去广告规则 -> 0
+#     · /etc/nftables.d/20-adguard-dns.nft   1552B -> 0（LAN DNS 劫持链断，
+#       nft 里 5335 零命中，去广告整体失效）
+#     · /etc/init.d/qmodem-worker            2180B -> 0（worker 服务脚本）
+#     · /etc/init.d/qmodem-mt5700-fix         604B -> 0
+#   对照组：v1.0→v1.1（10-24，ABI 不变）这些全部存活。
+#   判据=「运行期产生、重建不了或重建代价高」，以上全部满足（v1.2.1 现场
+#   是靠 pre-1028 备份逐文件回灌救活的，见 2026-10-29 日志）。
+#   AGH 只保 yaml + filters，不保整个 work/data（querylog 会无界增长，
+#   v1.1 现场曾到 497MB，不跨升级带走）。
+
 /etc/h5000m-wifi-applied
 /etc/h5000m-offload-applied
 /etc/qmodem-worker.conf
 /etc/h5000m
 /etc/qmodem/sms.sqlite3
 /etc/qmodem/2_1_received.json
+/etc/config/passwall
+/etc/tailscale
+/etc/adguardhome/adguardhome.yaml
+/etc/adguardhome/work/data/filters
+/etc/nftables.d
+/etc/init.d/qmodem-worker
+/etc/init.d/qmodem-mt5700-fix
