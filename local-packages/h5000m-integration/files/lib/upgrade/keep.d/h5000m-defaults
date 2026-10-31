@@ -55,9 +55,21 @@
 #   AGH 只保 yaml + filters，不保整个 work/data（querylog 会无界增长，
 #   v1.1 现场曾到 497MB，不跨升级带走）。
 
+# ★ 2026-10-31 跟上游：删三条 worker 孤儿条目（v1.2.2 刷机实测，铁证）：
+#
+#   删 /etc/qmodem-worker.conf
+#   删 /etc/init.d/qmodem-worker
+#   删 /etc/init.d/qmodem-mt5700-fix
+#     上游 luci-app-qmodem-generic 在新 pin 里把这四件（两个 init.d + 两个
+#     /usr/sbin 实体）整组删掉了，换成 qmodem-stats-collect/loop 架构：
+#     采样搬进 60 s 后台循环、带 8 s 硬超时、单实例锁，**RPC 里不再触发
+#     采样**——这正好是 rpcd 泄漏的正解（我们当年的 worker 60 s 只能限速，
+#     guard 只能兜底）。keep.d 把旧 worker 保回来也会被 apk 包事务当旧版
+#     孤儿清掉（v1.2.2 闸门 B 实测），保留条目只会空转 + 误导。
+#     rpcd-guard 保留：上游采样虽已出 RPC，UI 手动查 qmodem 仍走 RPC。
+
 /etc/h5000m-wifi-applied
 /etc/h5000m-offload-applied
-/etc/qmodem-worker.conf
 /etc/h5000m
 /etc/qmodem/sms.sqlite3
 /etc/qmodem/2_1_received.json
@@ -66,5 +78,3 @@
 /etc/adguardhome/adguardhome.yaml
 /etc/adguardhome/work/data/filters
 /etc/nftables.d
-/etc/init.d/qmodem-worker
-/etc/init.d/qmodem-mt5700-fix

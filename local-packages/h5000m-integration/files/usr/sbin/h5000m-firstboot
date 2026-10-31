@@ -79,16 +79,10 @@ H5000M_WIFI_HTMODE_5G='EHT80'
 H5000M_FLOW_OFFLOAD='1'
 H5000M_FLOW_OFFLOAD_HW='1'
 
-# qmodem-worker polling interval, in seconds.  This is the single knob that
-# decides how fast rpcd leaks memory on this board: rpcd never frees the output
-# buffer of an external-script ubus method, and qmodem is exactly that — so every
-# qmodem call costs heap.  Measured on the device: the worker is the source of
-# ~98% of all qmodem calls (freezing it drops qmodem invocations from 102 to 2
-# per 30 s), and at the stock 15 s it leaks 370-524 kB/min (≈ 750 MB/day), which
-# had accumulated to 619 MB and taken `available` down to 18 MB with load 21.
-# 60 s cuts that to a quarter.  The worker's own cache TTL is 90 s, so a 60 s
-# interval still refreshes before anything is considered stale.
-H5000M_QMODEM_WORKER_INTERVAL='60'
+# 2026-10-31: qmodem-worker、qmodem-worker.conf 及其 interval 常量整组删除。
+# 上游 luci-app-qmodem-generic 在新 pin 里不再提供 worker，改由
+# qmodem-stats-loop 在后台 60 s 采样（采样已完全移出 RPC），我们的
+# /etc/qmodem-worker.conf 调参手段随之失效，留着只是死代码。
 # shellcheck source=/dev/null
 [ -f /etc/h5000m-defaults.conf ] && . /etc/h5000m-defaults.conf
 
@@ -258,41 +252,6 @@ configure_timezone() {
 	uci -q set system.@system[0].zonename='Asia/Shanghai'
 	uci -q commit system
 	log "timezone: CST-8 / Asia/Shanghai (was '${tz}' / '${zn}')"
-	return 0
-}
-
-# ------------------------------------------------- qmodem-worker interval ----
-# See the note beside H5000M_QMODEM_WORKER_INTERVAL above: this is the knob that
-# decides how fast rpcd leaks on this board, because qmodem-worker is what drives
-# the external-script ubus method whose output buffer rpcd never frees.
-#
-# Written as a drop-in config file rather than by patching the qmodem package:
-# qmodem-worker reads /etc/qmodem-worker.conf, upstream does not ship that file,
-# and owning it here keeps the third-party package untouched and upgradeable.
-#
-# Guard: create only when absent.  An owner who has set their own interval keeps
-# it, a unit that already has the file is never rewritten, and the file is in
-# keep.d so sysupgrade preserves it — hence no marker.
-configure_worker_interval() {
-	[ -x /usr/sbin/qmodem-worker ] || return 1
-	[ -e /etc/qmodem-worker.conf ] && return 1
-
-	local v="${H5000M_QMODEM_WORKER_INTERVAL:-60}"
-	case "$v" in
-		''|*[!0-9]*) v=60 ;;
-	esac
-	# qmodem-worker clamps anything under 5 s itself; 15 s is the upstream
-	# default, so going below it here would defeat the purpose.
-	[ "$v" -lt 15 ] && v=15
-
-	printf '# Written on first boot by h5000m-firstboot.\n# Delete this file to fall back to the upstream default (15 s).\nQMODEM_WORKER_INTERVAL=%s\n' "$v" >/etc/qmodem-worker.conf
-	chmod 0644 /etc/qmodem-worker.conf
-	log "qmodem-worker: interval ${v}s (/etc/qmodem-worker.conf created)"
-
-	# The service starts at 96 and may already be running with the old value.
-	if [ -x /etc/init.d/qmodem-worker ]; then
-		/etc/init.d/qmodem-worker restart >/dev/null 2>&1
-	fi
 	return 0
 }
 
@@ -475,10 +434,9 @@ main() {
 
 	# Idempotent and self-guarding, so these run on every invocation rather than
 	# behind a marker — see the note above MARKER_WIFI.  Between them they cost
-	# one uci read, one stat and one grep, and they are what repairs a unit whose
-	# timezone, worker interval or crontab was lost or never applied.
+	# a few uci reads and a stat, and they are what repairs a unit whose
+	# timezone or crontab was lost or never applied.
 	configure_timezone
-	configure_worker_interval
 	configure_guard
 	configure_higoros_guard
 	configure_devices
